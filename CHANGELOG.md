@@ -11,3 +11,7 @@
   credentials. One viewer at a time; a stream the server ends after its time limit is reopened under the same viewer,
   which is where the server checks the key again; a camera that sends no picture is reported as such, never as
   working.
+- One scheduler for everything the plugin reads from the farm. It asks only while something is on screen or tracked,
+  never more often than the server allows, backs off when the server is slow or unreachable, stops asking when the
+  key or the address is wrong instead of retrying forever, and shows a printer it has not heard about for 30 seconds
+  as unknown rather than idle.
