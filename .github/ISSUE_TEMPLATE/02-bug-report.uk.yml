@@ -1,0 +1,71 @@
+name: Повідомлення про помилку
+description: Плагін поводиться неправильно в OrcaSlicer.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Дякуємо, що описуєте. **Ніколи не вставляйте API-ключ, секрет проксі чи адресу своєї ферми** — у журналі плагіна їх немає; якщо копіюєте щось інше, перевірте спершу.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Що сталося
+      description: Що ви побачили і що очікували натомість.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Як відтворити
+      placeholder: |
+        1. Наріжте …
+        2. Натисніть Print …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: plugin
+    attributes:
+      label: Версія плагіна
+      description: OrcaSlicer → Plugins, стовпчик «Plugin Version».
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: orca
+    attributes:
+      label: Версія OrcaSlicer
+      placeholder: "2.5.0-rc"
+    validations:
+      required: true
+
+  - type: input
+    id: bamdude
+    attributes:
+      label: Версія BamDude
+      description: BamDude → Налаштування → Система.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Операційна система
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Журнал
+      description: Рядки журналу OrcaSlicer, де згадано orca_bamdude, якщо є (Help → Show Configuration Folder → log).
+      render: text

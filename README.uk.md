@@ -1,13 +1,16 @@
 # OrcaBamDude
 
+[![CI](https://github.com/kainpl/orca-bamdude/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/kainpl/orca-bamdude/actions/workflows/ci.yml)
+
 Плагін для OrcaSlicer, що надсилає нарізані плати на ферму [BamDude](https://github.com/kainpl/bamdude) через її
 HTTP API.
 
 [English](README.md)
 
 > **Стан: у розробці, не випущено.** Ядро, незалежне від слайсера (налаштування з'єднання, HTTP-клієнт, перевірка
-> нарізаного 3MF, локальна копія файлу, що надсилається, і журнал операцій), написане й покрите тестами. Частина
-> для OrcaSlicer — агент принтера за власними кнопками Orca Print/Send, вкладка BamDude і камера — ще не написана.
+> нарізаного 3MF, локальна копія файлу, що надсилається, журнал операцій, relay камери й планувальник опитування),
+> написане й покрите тестами. Частина для OrcaSlicer — агент принтера за власними кнопками Orca Print/Send, вкладка
+> BamDude і плеєр камери — ще не написана.
 > Wheel для встановлення поки немає.
 
 ## Навіщо
@@ -40,6 +43,13 @@ API BamDude за API-ключем, а не вдає принтер у мереж
 - **Помилки вашою мовою.** Відмови BamDude приходять уже перекладеними сервером; сиру сторінку сервера плагін не
   показує.
 
+## Встановлення
+
+Коли версію буде випущено, завантажте `orca_bamdude_any.whl` з
+[Releases](https://github.com/kainpl/orca-bamdude/releases) (звірте з `SHA256SUMS` релізу) і встановіть в OrcaSlicer:
+*Plugins → Install local plugin*. Оновлення — так само: ім'я файлу не змінюється, тож OrcaSlicer зберігає
+налаштування плагіна.
+
 ## Розробка
 
 Python 3.12 (його вбудовує OrcaSlicer) і лише стандартна бібліотека; тестам потрібен `pytest`.
@@ -48,9 +58,12 @@ Python 3.12 (його вбудовує OrcaSlicer) і лише стандарт�
 pip install -r requirements-dev.txt
 python -m pytest
 ruff check . && ruff format --check .
+python tools/build_wheel.py      # dist/orca_bamdude_any.whl
 ```
 
-Тести не виходять у мережу далі `127.0.0.1` і не потребують ні OrcaSlicer, ні сервера BamDude.
+Тести не виходять у мережу далі `127.0.0.1` і не потребують ні OrcaSlicer, ні сервера BamDude. Робота потрапляє в
+`dev`; `main` містить випущений код. Як долучитися і як випускаються релізи: [CONTRIBUTING.md](CONTRIBUTING.md)
+(англійською).
 
 ## Ліцензія
 

@@ -1,0 +1,8 @@
+# LF in every checkout, on every OS. The wheel packs the source files' bytes as they are on disk, and a Windows
+# checkout with CRLF would build a different wheel than CI does; the build is meant to be the same everywhere.
+* text=auto eol=lf
+
+*.png binary
+*.svg text eol=lf
+*.3mf binary
+*.whl binary

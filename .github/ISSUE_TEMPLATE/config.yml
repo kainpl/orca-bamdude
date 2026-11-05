@@ -1,0 +1,13 @@
+# Template chooser. The bug forms come in pairs: English, then its Ukrainian copy with the next prefix; GitHub has
+# no localisation of issue forms, so the reporter picks a language here.
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea · Питання чи ідея
+    url: https://github.com/kainpl/bamdude/discussions
+    about: Ask how something works, or talk a feature through first — in BamDude's discussions. · Запитати, як щось працює, або обговорити ідею — в обговореннях BamDude.
+  - name: Security vulnerability · Вразливість
+    url: https://github.com/kainpl/orca-bamdude/security/advisories/new
+    about: Report privately, never through a public issue — see SECURITY.md. · Повідомити приватно, ніколи через публічний issue — див. SECURITY.md.
+  - name: A problem in BamDude itself · Проблема в самому BamDude
+    url: https://github.com/kainpl/bamdude/issues/new/choose
+    about: The farm, its queue, printers or web interface. · Ферма, її черга, принтери чи вебінтерфейс.

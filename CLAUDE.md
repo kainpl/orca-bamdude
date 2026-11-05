@@ -44,15 +44,24 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 ## Commands
 
 ```bash
-python -m pytest            # unit tests
+python -m pytest                 # unit tests
 ruff check . && ruff format --check .
+python tools/build_wheel.py      # dist/orca_bamdude_any.whl
 ```
 
 ## Versions and releases
 
-`__version__` in `src/orca_bamdude/__init__.py` is the plugin version, independent of BamDude's. The wheel's file
-name is fixed (`orca_bamdude_any.whl`): OrcaSlicer keys a plugin's settings, storage and permissions by it. Releases
-are `v<semver>` tags of this repository.
+`__version__` in `src/orca_bamdude/__init__.py` is the plugin version (`X.Y.Z`, pre-releases `X.Y.ZbN` /
+`X.Y.ZrcN`), independent of BamDude's. The wheel's file name is fixed (`orca_bamdude_any.whl`): OrcaSlicer keys a
+plugin's settings, storage and permissions by it. `tools/build_wheel.py` builds it reproducibly (sorted members, fixed
+timestamps and modes; `.gitattributes` keeps every checkout LF so a local build equals CI's).
+
+- Branches: `dev` takes the work (PRs target `dev`); `main` holds released code and only fast-forwards from `dev`.
+  Neither is force-pushed or deleted (a repository ruleset enforces it), and `v*` tags are never moved or deleted.
+- A release is a pushed `v<version>` tag: `.github/workflows/release.yml` runs the whole CI, `tools/release.py`
+  checks tag = `v` + `__version__` and takes the notes from CHANGELOG.md's `## [<version>] - <date>` section, and the
+  wheel is published with its `SHA256SUMS`. A stable tag must be on `main`; pre-releases are titled
+  `OrcaBamDude v<version> (pre-release)`. Steps: `CONTRIBUTING.md`.
 
 ## Style
 

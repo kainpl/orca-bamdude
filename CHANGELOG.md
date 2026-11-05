@@ -15,3 +15,5 @@
   never more often than the server allows, backs off when the server is slow or unreachable, stops asking when the
   key or the address is wrong instead of retrying forever, and shows a printer it has not heard about for 30 seconds
   as unknown rather than idle.
+- A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
+  checksums are attached to each GitHub release.

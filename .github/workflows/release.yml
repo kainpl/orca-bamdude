@@ -1,0 +1,62 @@
+name: Release
+
+# A pushed `v<version>` tag publishes that version as a GitHub release with the wheel and its SHA256SUMS:
+#
+#   v0.2.0b1 / v0.2.0rc1  pre-release, from dev (or main), titled "OrcaBamDude v0.2.0b1 (pre-release)"
+#   v0.2.0                stable, only from a commit on main, titled "OrcaBamDude v0.2.0", marked latest
+#
+# Before anything is published: the whole CI (lint, tests on three OSes, the reproducible wheel), the tag equals
+# `v` + __version__, and CHANGELOG.md has a non-empty `## [<version>]` section, which becomes the release notes.
+# Tags are never moved or deleted: a broken release is followed by the next version, not replaced.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and attach its files
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the branch history, to prove a stable tag is on main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Check the tag and write the notes
+        id: prep
+        run: |
+          mkdir -p dist
+          python tools/release.py prepare --tag "$GITHUB_REF_NAME" --notes dist/notes.md >> "$GITHUB_OUTPUT"
+      - name: A stable release is cut from main
+        if: steps.prep.outputs.prerelease == 'false'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is a stable version but its commit is not on main"
+            exit 1
+          fi
+      - name: Build the wheel
+        run: |
+          python tools/build_wheel.py dist
+          (cd dist && sha256sum orca_bamdude_any.whl > SHA256SUMS && cat SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.prep.outputs.title }}
+          PRERELEASE: ${{ steps.prep.outputs.prerelease }}
+        run: |
+          if [ "$PRERELEASE" = "true" ]; then kind=(--prerelease --latest=false); else kind=(--latest); fi
+          gh release create "$GITHUB_REF_NAME" dist/orca_bamdude_any.whl dist/SHA256SUMS \
+            --verify-tag --title "$TITLE" --notes-file dist/notes.md "${kind[@]}"

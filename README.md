@@ -1,13 +1,16 @@
 # OrcaBamDude
 
+[![CI](https://github.com/kainpl/orca-bamdude/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/kainpl/orca-bamdude/actions/workflows/ci.yml)
+
 An OrcaSlicer plugin that sends sliced plates to a [BamDude](https://github.com/kainpl/bamdude) print farm over
 its HTTP API.
 
 [Українською](README.uk.md)
 
 > **Status: in development, not released.** The host-independent core (connection settings, the HTTP client, the
-> sliced-3MF inspector, the local copy of the file being sent and the operation journal) is written and tested.
-> The OrcaSlicer side — the printer agent behind Orca's own Print/Send buttons, the BamDude tab and the camera —
+> sliced-3MF inspector, the local copy of the file being sent, the operation journal, the camera relay and the poll
+> scheduler) is written and tested. The OrcaSlicer side — the printer agent behind Orca's own Print/Send buttons, the
+> BamDude tab and the camera player —
 > is not written yet. There is no wheel to install.
 
 ## What it is for
@@ -38,6 +41,13 @@ AutoQueue, exactly as if it had been queued from BamDude's own web interface.
 - **Errors in your language.** BamDude refusals arrive translated by the server; the plugin never shows a raw server
   page.
 
+## Installing
+
+Once a version is released, download `orca_bamdude_any.whl` from
+[Releases](https://github.com/kainpl/orca-bamdude/releases) (check it against the release's `SHA256SUMS`) and install
+it in OrcaSlicer: *Plugins → Install local plugin*. Updating is the same: the file name never changes, so OrcaSlicer
+keeps the plugin's settings.
+
 ## Development
 
 Python 3.12 (the version OrcaSlicer embeds) and the standard library only; the tests need `pytest`.
@@ -46,9 +56,11 @@ Python 3.12 (the version OrcaSlicer embeds) and the standard library only; the t
 pip install -r requirements-dev.txt
 python -m pytest
 ruff check . && ruff format --check .
+python tools/build_wheel.py      # dist/orca_bamdude_any.whl
 ```
 
-The tests never reach a network beyond `127.0.0.1` and never need OrcaSlicer or a BamDude server.
+The tests never reach a network beyond `127.0.0.1` and never need OrcaSlicer or a BamDude server. Work lands on `dev`;
+`main` holds released code. How to contribute and how releases are cut: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 

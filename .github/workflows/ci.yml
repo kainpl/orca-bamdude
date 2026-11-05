@@ -1,16 +1,23 @@
 name: CI
 
-# Lint and unit tests on every push to main and every pull request. The plugin runs inside
-# OrcaSlicer's embedded CPython 3.12, so that is the one interpreter tested; the operating systems
-# differ because staging, the journal and the camera relay touch the file system and sockets.
+# Lint, unit tests and the wheel, on every push to main and dev, every pull request, and as the first stage of a
+# release (release.yml calls this workflow). The plugin runs inside OrcaSlicer's embedded CPython 3.12, so that is
+# the one interpreter tested; the operating systems differ because staging, the journal and the camera relay touch
+# the file system and sockets.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+    branches: [main, dev]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -42,3 +49,40 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Unit tests
         run: python -m pytest -v --tb=short --timeout=60
+
+  wheel:
+    needs: [lint, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build twice, compare
+        run: |
+          python tools/build_wheel.py dist/first
+          python tools/build_wheel.py dist
+          cmp dist/first/orca_bamdude_any.whl dist/orca_bamdude_any.whl
+          rm -r dist/first
+          (cd dist && sha256sum orca_bamdude_any.whl | tee SHA256SUMS)
+      - name: Install the wheel and import it outside OrcaSlicer
+        # pip only takes a PEP 427 name; the fixed name OrcaSlicer keys the plugin by is not one.
+        run: |
+          version="$(python tools/release.py version)"
+          cp dist/orca_bamdude_any.whl "/tmp/orca_bamdude-${version}-py3-none-any.whl"
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --no-deps "/tmp/orca_bamdude-${version}-py3-none-any.whl"
+          cd /tmp && /tmp/smoke/bin/python -c "
+          import orca_bamdude, orca_bamdude.api, orca_bamdude.camera_relay, orca_bamdude.config
+          import orca_bamdude.inspector, orca_bamdude.journal, orca_bamdude.poller, orca_bamdude.staging
+          assert orca_bamdude.__version__ == '${version}', orca_bamdude.__version__
+          print('imported', orca_bamdude.__version__, 'from', orca_bamdude.__file__)
+          "
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orca_bamdude_any
+          path: |
+            dist/orca_bamdude_any.whl
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

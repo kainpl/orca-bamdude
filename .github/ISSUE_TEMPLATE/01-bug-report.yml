@@ -1,0 +1,71 @@
+name: Bug Report
+description: The plugin misbehaves in OrcaSlicer.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for writing it up. **Never paste an API key, a proxy secret or your farm's address** — the plugin's log never contains them; if you copy anything else, check it first.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Slice …
+        2. Click Print …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin version
+      description: OrcaSlicer → Plugins, the "Plugin Version" column.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: orca
+    attributes:
+      label: OrcaSlicer version
+      placeholder: "2.5.0-rc"
+    validations:
+      required: true
+
+  - type: input
+    id: bamdude
+    attributes:
+      label: BamDude version
+      description: BamDude → Settings → System.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Lines from OrcaSlicer's log that mention orca_bamdude, if any (Help → Show Configuration Folder → log).
+      render: text
