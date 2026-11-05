@@ -3,9 +3,10 @@
 ## [Unreleased]
 
 - The plugin's host-independent core: connection settings that accept one server URL and refuse anything that could
-  send the key elsewhere, an HTTP client that always verifies TLS and never follows a redirect, a bounded reader for
-  sliced 3MF files, the plugin's own hashed copy of the file being sent, and a journal that records every operation
-  before its first request so a lost answer never queues the work twice.
+  send the key elsewhere, an HTTP client that always verifies TLS -- against a private CA pasted as PEM text, never a
+  file path -- and never follows a redirect, a bounded reader for sliced 3MF files, the plugin's own hashed copy of
+  the file being sent, and a journal that records every operation before its first request so a lost answer never
+  queues the work twice.
 - A local relay for the printer camera. OrcaSlicer's video player cannot send an API key or proxy headers, so it plays
   a fixed address on 127.0.0.1 behind a long secret, and the plugin opens the farm's stream for it with its own
   credentials. One viewer at a time; a stream the server ends after its time limit is reopened under the same viewer,

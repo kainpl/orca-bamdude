@@ -1,9 +1,12 @@
 """The transport against a real local HTTP server: what is sent, what is refused, what is never followed."""
 
+import ssl
 import threading
 import time
+from pathlib import Path
 
 import pytest
+from fakes import Server
 from fakes import json_answer as _json
 
 from orca_bamdude.config import Connection
@@ -187,8 +190,48 @@ def test_a_redirected_stream_is_never_followed(serve):
     assert refused.value.kind == "redirect"
 
 
-def test_tls_always_verifies():
-    import ssl
+TLS = Path(__file__).parent / "data" / "tls"
 
-    context = _ssl_context(None)
+
+def _tls_server():
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")
+    return Server(lambda m, p: _json(200, {"ok": True}), tls=context)
+
+
+@pytest.mark.parametrize("ca", [None, "ca.pem"])
+def test_tls_always_verifies(ca):
+    context = _ssl_context((TLS / ca).read_text(encoding="ascii") if ca else None)
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+
+
+def test_a_pasted_ca_verifies_the_server_it_signed():
+    server = _tls_server()
+    try:
+        connection = Connection.build(
+            f"https://localhost:{server.port}/base", "bd_k", ca_pem=(TLS / "ca.pem").read_text(encoding="ascii")
+        )
+        assert Transport(connection, timeout=5).request_json("GET", "/api/v1/x") == (200, {"ok": True})
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "host,ca",
+    [
+        ("localhost", "foreign-ca.pem"),  # signed by another CA
+        ("127.0.0.1", "ca.pem"),  # the right CA, but the certificate names only localhost
+        ("localhost", None),  # the system's trust does not know a private CA
+    ],
+)
+def test_a_server_the_ca_does_not_vouch_for_is_refused(host, ca):
+    server = _tls_server()
+    try:
+        pem = (TLS / ca).read_text(encoding="ascii") if ca else None
+        connection = Connection.build(f"https://{host}:{server.port}/base", "bd_k", ca_pem=pem)
+        with pytest.raises(TransportError) as refused:
+            Transport(connection, timeout=5).request_json("GET", "/api/v1/x")
+        assert refused.value.kind == "tls"
+        assert not server.seen  # nothing, the key included, was sent before the handshake failed
+    finally:
+        server.close()

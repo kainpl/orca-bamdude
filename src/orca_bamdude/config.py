@@ -6,17 +6,23 @@ Validated once, here, and frozen. Nothing in this module talks to the network.
   server's base path. Plain HTTP is allowed as an explicit choice (a LAN or VPN), never substituted for HTTPS.
 - Proxy headers (a Cloudflare Access pair, for example) have valid names and values without CR/LF, are bounded in
   number and size, and may never override what the connector itself sends or what a proxy reserves.
+- A private CA is PEM text the user pastes (host spec r2.2 §12), never a path: OrcaSlicer's audit refuses path
+  components such as ``cert`` or ``certs``, and text needs no file at all. Only CERTIFICATE blocks, bounded, and
+  loaded by ``ssl`` before it is accepted; no text means the system's trust.
 """
 
 from __future__ import annotations
 
-import os
 import re
+import ssl
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
 MAX_EXTRA_HEADERS = 8
 MAX_HEADER_VALUE = 1024
+MAX_CA_PEM = 64 * 1024
+_PEM_BLOCK = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END ([A-Z0-9 ]+)-----", re.S)
+_PEM_MARKER = re.compile(r"-----(BEGIN|END) [A-Z0-9 ]+-----")
 _TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
 # What the connector sends itself, what HTTP owns, and what a fronting proxy writes on its own.
 RESERVED_HEADERS = frozenset(
@@ -116,11 +122,35 @@ def validate_api_key(raw: str) -> str:
     return key
 
 
+def validate_ca_pem(raw: str | None) -> str | None:
+    """The CA as PEM text, stripped -- or ``None`` (the system's trust) when there is none.
+
+    Refused: more than ``MAX_CA_PEM`` bytes (``ca_pem_size``); a block that is not a CERTIFICATE, such as a private
+    key pasted by mistake (``ca_pem_block``); no complete block, a marker outside one, or text ``ssl`` cannot load
+    as certificates (``ca_pem_invalid``). The error never carries the text.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if len(text.encode("utf-8")) > MAX_CA_PEM:
+        raise ConfigError("ca_pem_size")
+    blocks = _PEM_BLOCK.findall(text)
+    if any(begin != "CERTIFICATE" or end != "CERTIFICATE" for begin, _body, end in blocks):
+        raise ConfigError("ca_pem_block")
+    if not blocks or len(_PEM_MARKER.findall(text)) != 2 * len(blocks):
+        raise ConfigError("ca_pem_invalid")
+    try:
+        ssl.create_default_context(cadata=text)
+    except (ssl.SSLError, ValueError) as exc:
+        raise ConfigError("ca_pem_invalid") from exc
+    return text
+
+
 @dataclass(frozen=True)
 class Connection:
     base_url: str
     api_key: str = field(repr=False)
-    ca_file: str | None = None
+    ca_pem: str | None = field(default=None, repr=False)
     extra_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     @property
@@ -128,13 +158,10 @@ class Connection:
         return self.base_url.startswith("https://")
 
     @classmethod
-    def build(cls, base_url: str, api_key: str, ca_file: str | None = None, extra_headers=None) -> Connection:
-        ca = (ca_file or "").strip() or None
-        if ca is not None and not os.path.isfile(ca):
-            raise ConfigError("ca_file")
+    def build(cls, base_url: str, api_key: str, ca_pem: str | None = None, extra_headers=None) -> Connection:
         return cls(
             base_url=canonical_base_url(base_url),
             api_key=validate_api_key(api_key),
-            ca_file=ca,
+            ca_pem=validate_ca_pem(ca_pem),
             extra_headers=validate_extra_headers(extra_headers),
         )

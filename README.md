@@ -33,7 +33,8 @@ AutoQueue, exactly as if it had been queued from BamDude's own web interface.
 ## How it behaves
 
 - **One server.** The plugin talks only to the URL you enter. TLS is always verified; a self-signed server is
-  trusted through a CA file you point it at, never by switching verification off. Redirects are never followed.
+  trusted through its CA certificate, pasted into the settings as PEM text, never by switching verification off.
+  Redirects are never followed.
 - **No duplicates.** Every send is an operation with an id the plugin writes down before its first request. If the
   answer is lost, sending again returns what the server did the first time instead of queueing the work twice.
 - **The bytes that were sliced.** The plugin copies the sliced file once into its own folder, hashes it, checks it

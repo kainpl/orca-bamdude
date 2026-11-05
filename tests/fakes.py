@@ -12,8 +12,9 @@ class Server:
     produced, the connection closed at the end).
     """
 
-    def __init__(self, routes):
+    def __init__(self, routes, tls=None):
         self.routes = routes
+        self.tls = tls
         self.seen = []
         outer = self
 
@@ -44,13 +45,19 @@ class Server:
             do_GET = do_POST = _handle
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if tls is not None:
+            self.httpd.socket = tls.wrap_socket(self.httpd.socket, server_side=True)
         self.httpd.handle_error = lambda request, address: None  # a client that hung up on purpose
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
 
     @property
+    def port(self):
+        return self.httpd.server_address[1]
+
+    @property
     def url(self):
-        return f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        return f"{'https' if self.tls else 'http'}://127.0.0.1:{self.port}"
 
     def close(self):
         self.httpd.shutdown()

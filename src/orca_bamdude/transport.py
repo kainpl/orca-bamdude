@@ -1,6 +1,7 @@
 """HTTP to one configured server, and nothing else (spec r2 §12).
 
-- TLS is verified, with an explicit CA file for a self-signed LAN server; there is no switch to turn it off.
+- TLS is verified -- against the pasted CA (``cadata``) for a self-signed LAN server, else the system's trust --
+  always with the host name checked; there is no switch to turn it off and no temporary file.
 - No redirect is followed, to any origin: a 3xx is a refusal the user fixes by entering the final URL.
 - Credentials go only to the configured authority. Responses are bounded; an HTML or other non-JSON body is a
   protocol error, never shown. An error's text is the server's ``detail.message`` at most -- never a raw body,
@@ -44,8 +45,8 @@ class HttpError(Exception):
         self.status, self.code, self.message, self.retry_after = status, code, message, retry_after
 
 
-def _ssl_context(ca_file: str | None) -> ssl.SSLContext:
-    context = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
+def _ssl_context(ca_pem: str | None) -> ssl.SSLContext:
+    context = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
     return context
@@ -85,7 +86,7 @@ class Transport:
         self._host = parts.hostname
         self._port = parts.port
         self._base_path = parts.path
-        self._context = _ssl_context(connection.ca_file) if parts.scheme == "https" else None
+        self._context = _ssl_context(connection.ca_pem) if parts.scheme == "https" else None
 
     # ------------------------------------------------------------------ plumbing
 
