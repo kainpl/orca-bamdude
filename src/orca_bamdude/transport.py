@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import ssl
 from collections.abc import Callable, Iterable
 from urllib.parse import urlencode, urlsplit
@@ -200,16 +201,89 @@ class Transport:
         finally:
             conn.close()
 
-    def open_stream(self, path: str, *, headers: dict | None = None, query=None, timeout: float = 15.0):
-        """An open response for a camera relay; the caller reads and closes it. Never follows a redirect."""
+    def open_stream(self, path: str, *, headers: dict | None = None, query=None, timeout: float = 15.0) -> Stream:
+        """An open streaming answer (the camera); the caller reads it and closes it. Never follows a redirect.
+
+        ``timeout`` bounds each read, so a camera that stalls ends the stream instead of holding a thread.
+        """
         conn = self._open(timeout)
-        response = self._send(conn, "GET", self._target(path, query), None, self._headers(headers or {}))
-        if 300 <= response.status < 400:
-            conn.close()
-            raise TransportError("redirect")
-        if response.status >= 400:
+        try:
             try:
-                self._json(response)
-            finally:
-                conn.close()
-        return conn, response
+                conn.request("GET", self._target(path, query), headers=self._headers(headers or {}))
+                # Kept before the answer is read: http.client may hand the socket to the response and forget it,
+                # and only the socket lets another thread end a read that is waiting for the next frame.
+                sock = conn.sock
+                response = conn.getresponse()
+            except ssl.SSLError as exc:
+                raise TransportError("tls") from exc
+            except TimeoutError as exc:
+                raise TransportError("timeout") from exc
+            except (ConnectionError, OSError, http.client.HTTPException) as exc:
+                raise TransportError("connect") from exc
+            if 300 <= response.status < 400:
+                raise TransportError("redirect")
+            if response.status >= 400:
+                self._json(response)  # raises the server's refusal
+        except BaseException:
+            conn.close()
+            raise
+        return Stream(conn, sock, response)
+
+
+class Stream:
+    """One open streaming answer. ``read`` returns what has arrived (up to ``size``) and ``b""`` at the end or once
+    closed; ``close`` may be called from another thread and ends a read that is waiting."""
+
+    def __init__(self, conn: http.client.HTTPConnection, sock, response: http.client.HTTPResponse):
+        self._conn = conn
+        self._sock = sock
+        self._response = response
+        self._closed = False
+        self.content_type = response.getheader("Content-Type") or ""
+
+    def read(self, size: int) -> bytes:
+        if self._closed:
+            return b""
+        try:
+            return self._response.read1(size)
+        except TimeoutError as exc:
+            if self._closed:
+                return b""
+            raise TransportError("timeout") from exc
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            if self._closed:
+                return b""
+            raise TransportError("connect") from exc
+
+    def close(self) -> None:
+        self._closed = True
+        if self._sock is not None:
+            _abort(self._sock)
+            self._sock = None
+        try:
+            self._response.close()
+        except Exception:
+            pass
+        self._conn.close()
+
+
+def _abort(sock) -> None:
+    """End a socket another thread may be reading from.
+
+    ``shutdown`` wakes a waiting ``recv`` on Linux and macOS but not on Windows, where only closing the socket
+    handle does; the response's file object keeps the handle open after ``close()``, so it is detached and closed
+    here. Both are done, in that order, on every platform.
+    """
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        fd = sock.detach()
+    except (OSError, ValueError):
+        return
+    if fd is not None and fd >= 0:
+        try:
+            socket.socket(fileno=fd).close()
+        except OSError:
+            pass

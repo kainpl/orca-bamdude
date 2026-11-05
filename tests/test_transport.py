@@ -1,72 +1,13 @@
 """The transport against a real local HTTP server: what is sent, what is refused, what is never followed."""
 
-import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import time
 
 import pytest
+from fakes import json_answer as _json
 
 from orca_bamdude.config import Connection
 from orca_bamdude.transport import MAX_JSON_RESPONSE, HttpError, Transport, TransportError, _ssl_context
-
-
-class Server:
-    def __init__(self, routes):
-        self.routes = routes
-        self.seen = []
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def _handle(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(length) if length else b""
-                outer.seen.append(
-                    {"method": self.command, "path": self.path, "headers": dict(self.headers), "body": body}
-                )
-                status, headers, payload = outer.routes(self.command, self.path)
-                self.send_response(status)
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            do_GET = do_POST = _handle
-
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.httpd.handle_error = lambda request, address: None  # a client that hung up on purpose
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-
-    @property
-    def url(self):
-        return f"http://127.0.0.1:{self.httpd.server_address[1]}"
-
-    def close(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
-def _json(status, payload, **headers):
-    return status, {"Content-Type": "application/json", **headers}, json.dumps(payload).encode()
-
-
-@pytest.fixture
-def serve():
-    servers = []
-
-    def start(routes, **conn):
-        server = Server(routes)
-        servers.append(server)
-        connection = Connection.build(server.url + "/base", "bd_test_key", **conn)
-        return server, Transport(connection, timeout=5)
-
-    yield start
-    for server in servers:
-        server.close()
 
 
 def test_a_request_carries_the_key_and_the_proxy_headers_to_the_base_path(serve):
@@ -183,6 +124,67 @@ def test_an_unreachable_server_is_a_connect_error():
         transport.request_json("GET", "/api/v1/printers/")
 
     assert refused.value.kind in ("connect", "timeout")
+
+
+MJPEG = "multipart/x-mixed-replace; boundary=frame"
+
+
+def test_a_stream_carries_the_key_and_the_printer_identity(serve):
+    server, transport = serve(lambda m, p: (200, {"Content-Type": MJPEG}, iter([b"--frame\r\n"])))
+
+    stream = transport.open_stream(
+        "/api/v1/printers/7/camera/stream", headers={"X-BamDude-Printer-Identity": "uuid-7"}, query={"fps": 5}
+    )
+    try:
+        assert stream.content_type == MJPEG
+        assert stream.read(1024) == b"--frame\r\n"
+    finally:
+        stream.close()
+
+    seen = server.seen[0]
+    assert seen["path"] == "/base/api/v1/printers/7/camera/stream?fps=5"
+    assert seen["headers"]["X-API-Key"] == "bd_test_key"
+    assert seen["headers"]["X-BamDude-Printer-Identity"] == "uuid-7"
+
+
+def test_closing_a_stream_from_another_thread_ends_a_waiting_read(serve):
+    release = threading.Event()
+
+    def body():
+        yield b"--frame\r\n"
+        release.wait(5)
+
+    _server, transport = serve(lambda m, p: (200, {"Content-Type": MJPEG}, body()))
+    stream = transport.open_stream("/api/v1/printers/7/camera/stream")
+    try:
+        assert stream.read(1024) == b"--frame\r\n"
+        threading.Timer(0.2, stream.close).start()
+        started = time.monotonic()
+
+        assert stream.read(1024) == b""
+        assert time.monotonic() - started < 3
+    finally:
+        release.set()
+        stream.close()
+
+
+def test_a_refused_stream_is_the_servers_refusal(serve):
+    detail = {"detail": {"error": "printer_scope", "message": "Not this printer."}}
+    _server, transport = serve(lambda m, p: _json(403, detail))
+
+    with pytest.raises(HttpError) as refused:
+        transport.open_stream("/api/v1/printers/7/camera/stream")
+
+    assert (refused.value.status, refused.value.code) == (403, "printer_scope")
+
+
+def test_a_redirected_stream_is_never_followed(serve):
+    _server, transport = serve(lambda m, p: (307, {"Location": "http://127.0.0.1:9/x"}, b""))
+
+    with pytest.raises(TransportError) as refused:
+        transport.open_stream("/api/v1/printers/7/camera/stream")
+
+    assert refused.value.kind == "redirect"
 
 
 def test_tls_always_verifies():

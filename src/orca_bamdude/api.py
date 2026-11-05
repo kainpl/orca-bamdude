@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from orca_bamdude.transport import HttpError, Transport
+from orca_bamdude.transport import HttpError, Stream, Transport
 
 PROTOCOL_VERSION = 1
+CAMERA_FPS = 5  # spec r2 §11: the default; the server clamps further
 
 
 class IncompatibleServer(Exception):
@@ -71,6 +72,15 @@ class ConnectorClient:
             "GET", "/api/v1/printers/status/batch", query=[("ids", pid) for pid in printer_ids[:100]]
         )
         return {int(k): v for k, v in (body or {}).items()}
+
+    def open_camera(self, printer_id: int, identity: str, *, fps: int = CAMERA_FPS) -> Stream:
+        """The printer's MJPEG stream through the header door. The identity makes the server refuse a printer that
+        took this number after the chosen one was deleted, instead of showing its camera."""
+        return self.transport.open_stream(
+            f"/api/v1/printers/{int(printer_id)}/camera/stream",
+            headers={"X-BamDude-Printer-Identity": identity},
+            query={"fps": fps},
+        )
 
     def upload(self, file_path: str, filename: str, size: int, *, progress=None, cancelled=None) -> dict:
         _status, body = self.transport.upload_file(
