@@ -20,6 +20,13 @@ the file on disk under a lock on the namespace folder that every process honours
 ``flock`` elsewhere): a save from a stale snapshot is refused (``stale``), a file now of a newer format is never
 overwritten (``newer_schema``) and a damaged one never replaced (``damaged``) -- each without changing a byte.
 ``update`` reads, changes and writes under that lock: the way to note a milestone so it is noted once.
+
+A record knows whether it is ``stored`` -- read from its file or written to it (Codex review r2, J1). A new one is
+written only where no file is (``exists`` otherwise); a stored one only over a valid record of the same operation
+(``missing`` when the file is gone, so a deleted record is never brought back, even one of the first format at
+revision 0; ``damaged`` for what ``load`` would reject or a file naming another operation). ``update`` compares the
+bytes it would write, never a shallow copy, so a change inside ``target``, ``body`` or ``result`` is kept (J2); it
+never lets ``mutate`` change what the record is -- its operation id, revision or schema (``identity``).
 """
 
 from __future__ import annotations
@@ -40,11 +47,14 @@ MILESTONE_KINDS = ("job", "assignment", "execution")
 NAMESPACE_FILE = "namespace.json"
 LOCK_FILE = ".lock"
 LOCK_TIMEOUT = 5.0
+# A record's attributes that live in memory only, never in its file.
+_RUNTIME = frozenset({"folder", "stored"})
 
 
 class JournalError(ValueError):
     """A record this code must not write: a newer format, another namespace's record, a stale snapshot, a damaged
-    or missing file, a lock another writer holds too long (``busy``), or a value outside the schema."""
+    or missing file, a new record where a file already is (``exists``), a ``mutate`` that changed what the record is
+    (``identity``), a lock another writer holds too long (``busy``), or a value outside the schema."""
 
 
 if os.name == "nt":
@@ -131,19 +141,6 @@ def _read_durable(path: str) -> dict | None:
     return payload
 
 
-def _check_durable(payload: dict | None, expected_revision: int) -> None:
-    """Refuse a write over a newer format or over a revision the writer has not seen."""
-    if payload is None:
-        if expected_revision != 0:
-            raise JournalError("missing")
-        return
-    schema = payload.get("schema", 1)
-    if not isinstance(schema, int) or schema > SCHEMA:
-        raise JournalError("newer_schema")
-    if payload.get("revision", 0) != expected_revision:
-        raise JournalError("stale")
-
-
 def _folder_name(namespace: tuple[str, str, str]) -> str:
     joined = "\n".join(namespace).encode("utf-8")
     return hashlib.sha256(joined).hexdigest()[:32]
@@ -178,9 +175,11 @@ class Record:
     revision: int = 0
     # Where the record was read from; never stored. A journal saves only a record of its own folder.
     folder: str | None = field(default=None, compare=False, repr=False)
+    # Read from its file or written to it; never stored. A record that is not is new: written only where no file is.
+    stored: bool = field(default=False, compare=False, repr=False)
 
     def as_dict(self) -> dict:
-        payload = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "folder"}
+        payload = {f.name: getattr(self, f.name) for f in fields(self) if f.name not in _RUNTIME}
         payload["plates"] = list(self.plates)
         payload["milestones"] = {key: list(seen) for key, seen in self.milestones.items()}
         return payload
@@ -196,7 +195,7 @@ class Record:
         return True
 
 
-_FIELDS = frozenset(f.name for f in fields(Record)) - {"folder"}
+_FIELDS = frozenset(f.name for f in fields(Record)) - _RUNTIME
 
 
 def _record(payload: dict, folder: str) -> Record:
@@ -215,7 +214,28 @@ def _record(payload: dict, folder: str) -> Record:
     if not isinstance(record.revision, int) or record.revision < 0:
         raise TypeError("revision")
     record.folder = folder
+    record.stored = True
     return record
+
+
+def _stored_record(payload: dict, operation_id: str, folder: str) -> Record:
+    """The record on disk as a writer may replace it: a newer format stays read-only, and what ``load`` would reject
+    -- or a file that names another operation -- is damaged, never replaced."""
+    schema = payload.get("schema", 1)
+    if isinstance(schema, int) and schema > SCHEMA:
+        raise JournalError("newer_schema")
+    try:
+        record = _record(payload, folder)
+    except TypeError as exc:
+        raise JournalError("damaged") from exc
+    if record.operation_id != operation_id:
+        raise JournalError("damaged")
+    return record
+
+
+def _serialised(record: Record) -> str:
+    """What a write would put on disk: the one comparison that sees a change inside a nested field."""
+    return json.dumps(record.as_dict(), ensure_ascii=False, sort_keys=True)
 
 
 def _read_namespace(folder: str) -> tuple[str, str, str] | None:
@@ -326,7 +346,8 @@ class Journal:
         record.revision += 1
 
     def save(self, record: Record) -> None:
-        """Write this snapshot -- only if the file on disk is still the revision it was read at."""
+        """Write this snapshot: a new record only where no file is, a stored one only over a valid record of the same
+        operation that is still the revision it was read at."""
         if record.phase not in PHASES:
             raise ValueError(record.phase)
         if record.schema > SCHEMA:
@@ -335,30 +356,38 @@ class Journal:
             raise JournalError("foreign_namespace")  # another namespace's record is shown, never written here
         path = self._path(record.operation_id)
         with self._lock():
-            _check_durable(_read_durable(path), record.revision)
+            payload = _read_durable(path)
+            if not record.stored:
+                if payload is not None:
+                    raise JournalError("exists")
+            elif payload is None:
+                raise JournalError("missing")  # deleted since it was read: never brought back
+            elif _stored_record(payload, record.operation_id, self.folder).revision != record.revision:
+                raise JournalError("stale")
             self._write(path, record)
         record.folder = self.folder
+        record.stored = True
 
     def update(self, operation_id: str, mutate) -> Record:
         """Read the record as it is on disk, let ``mutate`` change it, write it -- all under the folder's lock.
 
-        Nothing is written when ``mutate`` raises or changes nothing (a milestone already noted).
+        Nothing is written when ``mutate`` raises, changes nothing (a milestone already noted) or changes what the
+        record is -- its operation id, revision or schema.
         """
         path = self._path(operation_id)
         with self._lock():
             payload = _read_durable(path)
             if payload is None:
                 raise JournalError("missing")
-            _check_durable(payload, payload.get("revision", 0))
-            try:
-                record = _record(payload, self.folder)
-            except TypeError as exc:
-                raise JournalError("damaged") from exc
-            before = record.as_dict()
+            record = _stored_record(payload, operation_id, self.folder)
+            identity = (record.operation_id, record.revision, record.schema)
+            before = _serialised(record)
             mutate(record)
+            if (record.operation_id, record.revision, record.schema) != identity:
+                raise JournalError("identity")
             if record.phase not in PHASES:
                 raise ValueError(record.phase)
-            if record.as_dict() != before:
+            if _serialised(record) != before:
                 self._write(path, record)
         return record
 

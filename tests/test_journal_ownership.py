@@ -6,7 +6,10 @@ other processes honour too:
 
 - a save from a stale snapshot is refused and changes no byte -- a milestone written meanwhile survives;
 - a record whose file is now of a newer format is never overwritten, whatever the object in memory says;
-- ``update`` reads, changes and writes under the lock, so two writers never lose each other's milestone.
+- ``update`` reads, changes and writes under the lock, so two writers never lose each other's milestone;
+- a new record is written only where no file is, and a record once read only over a valid record of the same
+  operation: a deleted one is never brought back, and a file ``load`` rejects is never replaced (Codex review r2, J1);
+- ``update`` compares what it would write, not a shallow copy, so a change inside a nested field is kept (J2).
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from orca_bamdude.journal import SCHEMA, Journal, JournalError
+from orca_bamdude.journal import SCHEMA, Journal, JournalError, Record
 
 NS = ("server", "epoch", "actor")
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -110,6 +113,117 @@ def test_a_record_of_the_first_format_is_written_as_the_current_one(tmp_path):
 
     stored = json.loads((Path(journal.folder) / f"{operation_id}.json").read_text(encoding="utf-8"))
     assert (stored["schema"], stored["revision"], stored["phase"]) == (SCHEMA, 1, "unknown")
+
+
+def _first_format(record) -> dict:
+    stored = record.as_dict()
+    stored.pop("revision")
+    stored.pop("schema")
+    return stored
+
+
+def test_a_deleted_record_of_the_first_format_is_not_brought_back(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    record = journal.create("part.3mf", "1" * 64)
+    path = Path(journal.folder) / f"{record.operation_id}.json"
+    path.write_text(json.dumps(_first_format(record)), encoding="utf-8")
+    old = journal.load(record.operation_id)
+    assert old.revision == 0
+    path.unlink()
+    old.phase = "unknown"
+
+    with pytest.raises(JournalError, match="missing"):
+        journal.save(old)
+
+    assert not path.exists()
+
+
+def test_a_file_load_rejects_is_never_replaced(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    record = journal.create("part.3mf", "2" * 64)
+    path = Path(journal.folder) / f"{record.operation_id}.json"
+    path.write_text(json.dumps({"schema": SCHEMA, "revision": record.revision}), encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(TypeError):
+        journal.load(record.operation_id)
+    record.phase = "unknown"
+
+    with pytest.raises(JournalError, match="damaged"):
+        journal.save(record)
+    with pytest.raises(JournalError, match="damaged"):
+        journal.update(record.operation_id, lambda r: setattr(r, "phase", "unknown"))
+
+    assert path.read_bytes() == before
+
+
+def test_a_file_naming_another_operation_is_damaged(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    one, two = journal.create("a.3mf", "3" * 64), journal.create("b.3mf", "4" * 64)
+    path = Path(journal.folder) / f"{one.operation_id}.json"
+    path.write_text((Path(journal.folder) / f"{two.operation_id}.json").read_text(encoding="utf-8"), encoding="utf-8")
+    before = path.read_bytes()
+    one.phase = "unknown"
+
+    with pytest.raises(JournalError, match="damaged"):
+        journal.save(one)
+
+    assert path.read_bytes() == before
+
+
+def test_a_new_record_is_never_written_over_an_existing_file(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    stored = journal.create("part.3mf", "5" * 64)
+    path = Path(journal.folder) / f"{stored.operation_id}.json"
+    before = path.read_bytes()
+    fresh = Record(
+        operation_id=stored.operation_id, phase="prepared", created_at=2.0, filename="other.3mf", source_sha256="6" * 64
+    )
+
+    with pytest.raises(JournalError, match="exists"):
+        journal.save(fresh)
+
+    assert path.read_bytes() == before
+
+
+def test_update_keeps_a_change_inside_a_nested_field(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    record = journal.create("part.3mf", "7" * 64, target={"kind": "printer", "printer_id": 1})
+
+    updated = journal.update(record.operation_id, lambda r: r.target.update(printer_id=2))
+
+    assert updated.target["printer_id"] == 2
+    stored = journal.load(record.operation_id)
+    assert stored.target["printer_id"] == 2 and stored.revision == record.revision + 1
+
+
+def test_update_keeps_a_scalar_change_and_writes_nothing_for_none(tmp_path):
+    journal = Journal(str(tmp_path), NS)
+    record = journal.create("part.3mf", "8" * 64)
+    path = Path(journal.folder) / f"{record.operation_id}.json"
+
+    changed = journal.update(record.operation_id, lambda r: setattr(r, "phase", "uploading"))
+    before = path.read_bytes()
+    same = journal.update(record.operation_id, lambda r: setattr(r, "phase", "uploading"))
+
+    assert (changed.phase, changed.revision) == ("uploading", record.revision + 1)
+    assert same.revision == changed.revision and path.read_bytes() == before
+    same.phase = "uploaded"
+    journal.save(same)  # what update returned is the record as stored: a save over it is not stale
+    assert journal.load(record.operation_id).phase == "uploaded"
+
+
+@pytest.mark.parametrize("field", ["operation_id", "revision", "schema"])
+def test_update_refuses_a_change_of_what_the_record_is(tmp_path, field):
+    journal = Journal(str(tmp_path), NS)
+    record = journal.create("part.3mf", "9" * 64)
+    path = Path(journal.folder) / f"{record.operation_id}.json"
+    before = path.read_bytes()
+    other = {"operation_id": "0b8c6a43-5f0e-4ad5-9b8e-0e6d0b0f6c11", "revision": 7, "schema": SCHEMA + 1}
+
+    with pytest.raises(JournalError, match="identity"):
+        journal.update(record.operation_id, lambda r: setattr(r, field, other[field]))
+
+    assert path.read_bytes() == before
 
 
 def _child(script: str) -> subprocess.Popen:

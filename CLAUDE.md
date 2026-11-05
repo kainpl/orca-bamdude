@@ -23,8 +23,10 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   again or asking the server, never by inventing a new operation. A changed namespace means the server was restored
   or replaced: old records are shown as unknown and are never resubmitted automatically. A record is changed only by
   a compare-and-set on its revision under the namespace folder's lock, which other OrcaSlicer processes honour (two
-  overlap on every restart): a stale snapshot is refused, a newer format never overwritten; note milestones through
-  `Journal.update`.
+  overlap on every restart): a stale snapshot is refused, a newer format never overwritten. A new record is written
+  only where no file is; a record once read only over a valid record of the same operation -- a deleted one is never
+  brought back, a file `load` rejects never replaced. Note milestones through `Journal.update`, which compares the
+  bytes it would write and refuses a `mutate` that changes the operation id, revision or schema.
 - **Only the plugin's own copy is sent.** `staging.py` copies and hashes the file once; the inspector and the upload
   read only that copy.
 - **One server, verified.** TLS verification has no off switch (a CA pasted as PEM text is the way to trust a
