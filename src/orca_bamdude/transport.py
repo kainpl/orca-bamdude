@@ -15,6 +15,7 @@ import json
 import os
 import socket
 import ssl
+import threading
 from collections.abc import Callable, Iterable
 from urllib.parse import urlencode, urlsplit
 
@@ -233,34 +234,63 @@ class Transport:
 
 class Stream:
     """One open streaming answer. ``read`` returns what has arrived (up to ``size``) and ``b""`` at the end or once
-    closed; ``close`` may be called from another thread and ends a read that is waiting."""
+    closed; ``close`` may be called from another thread and ends a read that is waiting.
+
+    ``http.client``'s response is not thread-safe: a read that reaches the end closes the response itself, and a
+    second thread closing it at the same moment breaks it. So the response has one owner at a time. ``close`` from
+    another thread only wakes a waiting read (``_abort``); the read, on its way out, releases the response. A
+    ``close`` while nothing is reading releases it at once.
+    """
 
     def __init__(self, conn: http.client.HTTPConnection, sock, response: http.client.HTTPResponse):
         self._conn = conn
         self._sock = sock
         self._response = response
+        self._lock = threading.Lock()
         self._closed = False
+        self._reading = False
+        self._released = False
         self.content_type = response.getheader("Content-Type") or ""
 
     def read(self, size: int) -> bytes:
-        if self._closed:
-            return b""
+        with self._lock:
+            if self._closed:
+                return b""
+            self._reading = True
         try:
             return self._response.read1(size)
-        except TimeoutError as exc:
+        except Exception as exc:
             if self._closed:
-                return b""
-            raise TransportError("timeout") from exc
-        except (OSError, ValueError, http.client.HTTPException) as exc:
-            if self._closed:
-                return b""
-            raise TransportError("connect") from exc
+                return b""  # woken by close(): whatever the response raised on the way out is not a failure
+            if isinstance(exc, TimeoutError):
+                raise TransportError("timeout") from exc
+            if isinstance(exc, OSError | ValueError | http.client.HTTPException):
+                raise TransportError("connect") from exc
+            raise
+        finally:
+            with self._lock:
+                self._reading = False
+                release = self._closed
+            if release:
+                self._release()
 
     def close(self) -> None:
-        self._closed = True
-        if self._sock is not None:
-            _abort(self._sock)
-            self._sock = None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            reading = self._reading
+            sock, self._sock = self._sock, None
+        if sock is not None:
+            _abort(sock)
+        if not reading:
+            self._release()
+
+    def _release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
         try:
             self._response.close()
         except Exception:
