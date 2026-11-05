@@ -21,20 +21,23 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - **An operation id is written down before its first request.** `journal.py` records it inside the namespace
   `connector_server_id` + `storage_epoch` + the key's `actor_id`; a lost answer is resolved by sending the same id
   again or asking the server, never by inventing a new operation. A changed namespace means the server was restored
-  or replaced: old records are shown as unknown and are never resubmitted automatically.
+  or replaced: old records are shown as unknown and are never resubmitted automatically. A record is changed only by
+  a compare-and-set on its revision under the namespace folder's lock, which other OrcaSlicer processes honour (two
+  overlap on every restart): a stale snapshot is refused, a newer format never overwritten; note milestones through
+  `Journal.update`.
 - **Only the plugin's own copy is sent.** `staging.py` copies and hashes the file once; the inspector and the upload
   read only that copy.
-- **One server, verified.** TLS verification has no off switch (a CA file is the way to trust a self-signed
-  server), no redirect is followed, credentials go only to the configured authority, every answer is bounded, and an
+- **One server, verified.** TLS verification has no off switch (a CA pasted as PEM text is the way to trust a
+  self-signed server; never a file path), no redirect is followed, credentials go only to the configured authority, every answer is bounded, and an
   error shown to the user is the server's sentence at most — never a raw body, a header or the key.
 
 ## Layout
 
-- `src/orca_bamdude/config.py` — connection settings: canonical server URL, API key, CA file, proxy headers.
+- `src/orca_bamdude/config.py` — connection settings: canonical server URL, API key, CA as PEM text, proxy headers.
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
-- `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records.
+- `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision under a folder lock.
 - `camera_relay.py` — the loopback relay OrcaSlicer's FFmpeg plays the camera from (`/<secret>/<printer identity>` on
   127.0.0.1); the upstream and its credentials stay in the client.
 - `poller.py` — the one poll scheduler: channels asked only while wanted, one request in flight each, backoff,
