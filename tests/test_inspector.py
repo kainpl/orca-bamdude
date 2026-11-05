@@ -1,6 +1,7 @@
 import zipfile
 
 import pytest
+
 from orca_bamdude.inspector import InspectionError, inspect
 
 SLICE_INFO = """<?xml version="1.0" encoding="UTF-8"?>

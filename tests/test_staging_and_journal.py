@@ -4,6 +4,7 @@ import os
 import uuid
 
 import pytest
+
 from orca_bamdude.journal import Journal
 from orca_bamdude.staging import StagingError, stage
 

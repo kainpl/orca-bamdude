@@ -1,0 +1,44 @@
+name: CI
+
+# Lint and unit tests on every push to main and every pull request. The plugin runs inside
+# OrcaSlicer's embedded CPython 3.12, so that is the one interpreter tested; the operating systems
+# differ because staging, the journal and the camera relay touch the file system and sockets.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+      - name: Ruff check
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install test tools
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests
+        run: python -m pytest -v --tb=short --timeout=60

@@ -1,0 +1,20 @@
+# Tool configuration only. OrcaSlicer installs the plugin from a wheel with a fixed file name; that wheel is built
+# by this repository's own build script, not by a PEP 517 backend, so there is no [project] table here. The plugin
+# needs nothing beyond the standard library of OrcaSlicer's embedded CPython 3.12.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"]
+ignore = ["E501", "SIM105", "SIM108", "UP017"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["orca_bamdude"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
