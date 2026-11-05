@@ -40,7 +40,8 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
-- `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision under a folder lock.
+- `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision
+  under a folder lock.
 - `camera_relay.py` — the loopback relay OrcaSlicer's FFmpeg plays the camera from (`/<secret>/<printer identity>` on
   127.0.0.1); the upstream and its credentials stay in the client.
 - `poller.py` — the one poll scheduler: channels asked only while wanted, one request in flight each, backoff,
