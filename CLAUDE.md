@@ -28,8 +28,9 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - **Only the plugin's own copy is sent.** `staging.py` copies and hashes the file once; the inspector and the upload
   read only that copy.
 - **One server, verified.** TLS verification has no off switch (a CA pasted as PEM text is the way to trust a
-  self-signed server; never a file path), no redirect is followed, credentials go only to the configured authority, every answer is bounded, and an
-  error shown to the user is the server's sentence at most — never a raw body, a header or the key.
+  self-signed server; never a file path), no redirect is followed, credentials go only to the configured authority,
+  every answer is bounded, and an error shown to the user is the server's sentence at most — never a raw body, a
+  header or the key.
 
 ## Layout
 
