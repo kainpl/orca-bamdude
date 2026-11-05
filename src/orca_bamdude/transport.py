@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 import ssl
 from collections.abc import Callable, Iterable
@@ -270,14 +271,19 @@ class Stream:
 def _abort(sock) -> None:
     """End a socket another thread may be reading from.
 
-    ``shutdown`` wakes a waiting ``recv`` on Linux and macOS but not on Windows, where only closing the socket
-    handle does; the response's file object keeps the handle open after ``close()``, so it is detached and closed
-    here. Both are done, in that order, on every platform.
+    ``shutdown`` wakes a waiting read on Linux and macOS; the descriptor is then closed by ``response.close()``,
+    after the reader has let go of it. It must not be closed here: the reader may already hold its number, the OS
+    may give that number to the next socket anyone opens, and the reader would then wait on a stranger's socket
+    until its timeout (seen on macOS in CI). Windows is the exception: ``shutdown`` does not wake a waiting
+    ``recv`` there, only closing the handle does, and the response's file object keeps it open after ``close()``,
+    so on Windows it is detached and closed here.
     """
     try:
         sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
+    if os.name != "nt":
+        return
     try:
         fd = sock.detach()
     except (OSError, ValueError):
