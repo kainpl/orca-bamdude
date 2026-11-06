@@ -10,7 +10,8 @@
   sent to another server, or before a restore, as unknown -- it is never sent again from there. A record is written only
   over the revision it was read at, under a lock other OrcaSlicer processes honour, so an older view of it -- or a
   second OrcaSlicer still closing down -- can never undo a newer write, bring back a deleted record, replace a damaged
-  one or forget a notification already shown.
+  one or forget a notification already shown. On Windows, a file read while another thread or OrcaSlicer process
+  saves it is waited for, never taken for a damaged one.
 - A local relay for the printer camera. OrcaSlicer's video player cannot send an API key or proxy headers, so it plays
   a fixed address on 127.0.0.1 behind a long secret, and the plugin opens the farm's stream for it with its own
   credentials. One viewer at a time; a stream the server ends after its time limit is reopened under the same viewer,
@@ -28,5 +29,15 @@
   the address back, and the tab says when a request was not recorded. A printer preset can point the plugin at another address of the farm; the
   API key and proxy headers always come from the tab, never from the preset, because presets are exported and
   shared. OrcaSlicer's own configuration editor never shows the key.
+- Farm printers in OrcaSlicer's device list. Choosing the BamDude agent lists the printers your key may see whose
+  model OrcaSlicer knows, under their BamDude names; the selected one shows its state, temperatures, progress, AMS
+  and external spool on the Device tab, and its live camera through the local relay. Nothing BamDude does not know is
+  shown as known: a printer BamDude cannot reach stays selectable -- the farm can still queue work for it -- but its
+  state and temperatures are left out, and a printer with two nozzles shows no nozzle temperature rather than the
+  wrong one. When the farm stops answering, the plugin stops reporting and OrcaSlicer shows the printer offline about
+  a minute after the last answer; it comes back by itself when the farm answers again. After a restore, another key
+  or another address, the earlier devices are not reused: OrcaSlicer says the printer belongs to an earlier BamDude
+  connection, in English or Ukrainian as OrcaSlicer is set, and you choose it again. Without the tab open the plugin
+  reads only the printer you selected.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.

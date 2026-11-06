@@ -94,6 +94,34 @@ def test_a_step_that_fails_or_overruns_leaves_its_resources_alone(tmp_path):
     assert report["unfinished"] == ["stop"]
 
 
+def test_the_fleet_starts_once_and_its_stop_is_the_runtimes_step(tmp_path):
+    runtime = make(tmp_path)
+    assert runtime.start_fleet() and runtime.start_fleet()
+    assert sum(1 for _order, stage, _fn, _deadline in runtime._steps if stage == "stop") == 1
+    report = runtime.shutdown("unload")
+    assert report["steps"]["stop"] == "ok"
+    assert runtime.start_fleet() is False  # nothing starts after the fence
+
+
+def test_a_fleet_whose_threads_outlive_their_stop_keeps_cleanup_from_running(tmp_path):
+    runtime = make(tmp_path)
+    runtime.start_fleet()
+    stop = runtime.fleet.stop
+    runtime.fleet.stop = lambda timeout: (stop(timeout), False)[1]  # threads still alive at the deadline
+    ran = []
+    runtime.on_shutdown("cleanup", lambda: ran.append("cleanup"))
+    report = runtime.shutdown("unload")
+    assert report["steps"]["stop"] == "RuntimeError"
+    assert report["steps"]["cleanup"] == "skipped" and ran == []
+
+
+def test_a_fleet_never_started_owns_no_thread_and_no_step(tmp_path):
+    runtime = make(tmp_path)
+    report = runtime.shutdown("unload")
+    assert "stop" not in report["steps"]
+    assert runtime.relay.active_connections == 0
+
+
 def test_cleanup_waits_for_the_owner_to_actually_finish(tmp_path):
     runtime = make(tmp_path)
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -437,6 +465,30 @@ def test_a_tab_retry_gives_a_client_to_a_target_held_after_this_load_began(tmp_p
     assert runtime.ask_again([A], done=done.append)
     assert runtime.flush(5) and done == [True]
     assert runtime.snapshot.blocked is None and runtime.snapshot.connection is not None
+
+
+def test_the_fleet_follows_the_snapshot_a_written_release_decides(tmp_path):
+    # The connection a release gives is the fleet's at once: a connect after it is not refused as held.
+    runtime = make(tmp_path, requested={A})
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "elsewhere")
+    heard = []
+    runtime.callbacks.set("local_connect", lambda *args: heard.append(args))
+    runtime.apply_settings(BASE, None, None)
+    runtime.fleet.connect("bamdude-x")
+    assert heard == [(1, "bamdude-x", runtime.say("connect.restart"))]
+    assert runtime.ask_again([A]) and runtime.flush(5)
+    heard.clear()
+    runtime.fleet.connect("bamdude-x")  # waits for the list now: nothing refused
+    assert heard == []
+
+
+def test_the_runtimes_sentences_follow_orcas_language(tmp_path):
+    runtime = make(tmp_path)
+    english = runtime.say("connect.foreign")
+    runtime.set_language("uk_UA")
+    assert runtime.say("connect.foreign") != english
+    runtime.set_language(None)
+    assert runtime.say("connect.foreign") == english
 
 
 def test_a_late_release_is_decided_for_the_newest_settings(tmp_path, monkeypatch):

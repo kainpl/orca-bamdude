@@ -179,9 +179,19 @@ def _preset_override():
 
 
 def refresh_settings():
-    """Read base and the preset's override and freeze them. UI thread only (§4.3, H1 review R3)."""
+    """Read base, the preset's override and the UI language, and freeze them. UI thread only (§4.3, H1 review R3)."""
+    try:
+        RUNTIME.set_language(orca.host.app_info().get("language"))
+    except Exception:  # noqa: BLE001 -- English is said instead
+        pass
     override, preset_name, error = _preset_override()
     return RUNTIME.apply_settings(read_base(INSTALL) or {}, override, preset_name, override_error=error)
+
+
+def _ui_entry():
+    """A UI entry of the agent: the snapshot is taken here and the fleet's thread starts at the first one."""
+    refresh_settings()
+    RUNTIME.start_fleet()
 
 
 def _take_storage() -> None:
@@ -202,7 +212,9 @@ document.getElementById("msg").textContent = scope === "preset"
 
 
 class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
-    """The printer agent. H1 registers it and answers safely; discovery, connection and jobs come in H2/H3."""
+    """The printer agent: discovery, connection, reports and the camera through the Runtime's fleet (§5); jobs come
+    in H3. Every method returns at once on the UI thread -- what needs the farm is answered by the fleet's thread
+    through the callbacks the host handed over."""
 
     def __init__(self):
         super().__init__()
@@ -239,23 +251,32 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
         if str(getattr(event, "name", event)).endswith(("PresetSelected", "PresetSaved")):
             refresh_settings()
 
-    # -- required by the binding; H2/H3 fill them in -------------------------------------------------------------
+    # -- devices (§5.1-§5.3) ---------------------------------------------------------------------------------------
     def connect_printer(self, params):
-        return ERR
+        """UI thread (``DeviceManager::set_selected_machine``): the answer follows as ``local_connect``."""
+        _ui_entry()
+        return RUNTIME.fleet.connect(getattr(params, "dev_id", "") or "", getattr(params, "password", "") or "")
 
     def disconnect_printer(self):
-        return OK
+        return RUNTIME.fleet.disconnect()
 
     def send_message(self, dev_id, json_str, qos, flag):
-        return ERR_NOT_SUPPORTED
+        return RUNTIME.fleet.command(dev_id, json_str)
 
     def send_message_to_printer(self, dev_id, json_str, qos, flag):
-        return ERR_NOT_SUPPORTED
+        return RUNTIME.fleet.command(dev_id, json_str)
 
     def start_discovery(self, start, sending):
         if start:  # UI thread, after an agent switch: the first point a snapshot may be taken
-            refresh_settings()
+            _ui_entry()
+            RUNTIME.fleet.discover()
         return True
+
+    def get_camera_stream_mode(self):
+        return orca.printer_agent.CameraStreamMode.HTTP
+
+    def get_camera_url(self):
+        return RUNTIME.fleet.camera_url()
 
     def bind_detect(self, dev_ip, sec_link, detect):
         return ERR_NOT_SUPPORTED
@@ -297,31 +318,41 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
     def unbind(self, dev_id):
         return ERR_NOT_SUPPORTED
 
+    # -- the host's callbacks: kept, called by the fleet from its thread (the host re-posts each) ---------------------
     def set_server_callback(self, fn):
+        RUNTIME.callbacks.set("server_error", fn)
         return OK
 
     def set_on_ssdp_msg_fn(self, fn):
+        RUNTIME.callbacks.set("ssdp", fn)
         return OK
 
     def set_on_printer_connected_fn(self, fn):
+        RUNTIME.callbacks.set("printer_connected", fn)
         return OK
 
     def set_on_subscribe_failure_fn(self, fn):
+        RUNTIME.callbacks.set("subscribe_failure", fn)
         return OK
 
     def set_on_message_fn(self, fn):
+        RUNTIME.callbacks.set("message", fn)
         return OK
 
     def set_on_user_message_fn(self, fn):
+        RUNTIME.callbacks.set("user_message", fn)
         return OK
 
     def set_on_local_connect_fn(self, fn):
+        RUNTIME.callbacks.set("local_connect", fn)
         return OK
 
     def set_on_local_message_fn(self, fn):
+        RUNTIME.callbacks.set("local_message", fn)
         return OK
 
     def set_queue_on_main_fn(self, fn):
+        RUNTIME.callbacks.set("queue_on_main", fn)
         return OK
 
 

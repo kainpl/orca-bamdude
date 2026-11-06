@@ -18,6 +18,11 @@ host (host spec r2.3.2, analysis RF-1…RF-16). What it models:
   same process (RF-2).
 - **Presets.** The edited printer preset carries ``printer_plugin_config_overrides`` (a JSON list); the override for
   a capability wins wholesale over the base entry (RF-1).
+- **Agent callbacks.** Selecting the agent sets its ``set_on_*_fn`` callbacks on the UI thread, then calls
+  ``start_discovery(True, False)`` (rc ``NetworkAgent::apply_printer_callbacks``, ``GUI_App::switch_printer_agent``).
+  Each callback re-posts to the UI thread with ``CallAfter`` and returns at once (``GUI_App::init_networking_callbacks``);
+  the SSDP one is dropped unless a ``queue_on_main`` function was set (``NetworkAgent::apply_discovery_callback``). A
+  failed ``local_connect`` shows its message as it is: "Connect <name> failed! [SN:<dev_id>, code=<msg>]" (RF-4).
 """
 
 from __future__ import annotations
@@ -45,6 +50,34 @@ class NotificationLevel(enum.Enum):
     WarningNotificationLevel = 3
     ErrorNotificationLevel = 4
 
+
+class CameraStreamMode(enum.Enum):
+    None_ = 0
+    HTTP = 1
+    HTTPS = 2
+    HTTP_SNAPSHOT = 3
+    RTSP = 4
+
+
+class PrinterConnectionParams:
+    """What ``MachineObject::connect`` hands ``connect_printer``: the password is the access code the user typed."""
+
+    def __init__(self, dev_id="", host="", port="", username="", password="", use_ssl=False, ca_file=""):
+        self.dev_id, self.host, self.port, self.username = dev_id, host, port, username
+        self.password, self.use_ssl, self.ca_file = password, use_ssl, ca_file
+
+
+AGENT_CALLBACK_SETTERS = (
+    "set_queue_on_main_fn",
+    "set_on_ssdp_msg_fn",
+    "set_on_printer_connected_fn",
+    "set_on_subscribe_failure_fn",
+    "set_on_message_fn",
+    "set_on_user_message_fn",
+    "set_on_local_connect_fn",
+    "set_on_local_message_fn",
+    "set_server_callback",
+)
 
 PENDING, CLAIMED, ABANDONED = "pending", "claimed", "abandoned"
 
@@ -142,6 +175,13 @@ class Host:
         self.preset_raw: str | None = None  # when set, the envelope string the preset returns as it is
         self.preset_error: Exception | None = None  # when set, the preset accessor raises it
         self.preset_reads: list[bool] = []  # one entry per preset read: whether it ran on the UI thread
+        self.language = "en_US"  # app_info()["language"], as current_language_code_safe() reports it
+        self.devices: dict[str, dict] = {}  # SSDP announcements the host accepted, by dev_id
+        self.device_messages: list[tuple] = []  # (dev_id, message) from local_message
+        self.connects: list[tuple] = []  # (status, dev_id, message) from local_connect
+        self.dialogs: list[str] = []  # what a failed connect shows the user
+        self.connected_topics: list[str] = []
+        self.queue_on_main_set = False
         self._saved_modules: dict | None = None
         self.orca = self._build_module()
 
@@ -265,6 +305,55 @@ class Host:
         agent = self.capability("BamDudePrinter")
         return self.ui.call(lambda: self.audited("BamDudePrinter", getattr(agent, method), *args))
 
+    def select_agent(self) -> None:
+        """The user picks our agent (or a preset that uses it): callbacks first, then discovery, on the UI thread."""
+        host = self
+
+        def queue_on_main(fn):
+            host.ui.post(fn)
+
+        def ssdp(message):
+            if not host.queue_on_main_set:
+                return  # rc drops the SSDP callback unless queue_on_main was set
+            data = json.loads(message)
+            host.ui.post(lambda: host.devices.__setitem__(data["dev_id"], data))
+
+        def local_connect(status, dev_id, message):
+            def show():
+                host.connects.append((status, dev_id, message))
+                if status == 1:
+                    name = host.devices.get(dev_id, {}).get("dev_name", dev_id)
+                    host.dialogs.append(f"Connect {name} failed! [SN:{dev_id}, code={message}]")
+
+            host.ui.post(show)
+
+        def local_message(dev_id, message):
+            host.ui.post(lambda: host.device_messages.append((dev_id, message)))
+
+        def printer_connected(topic):
+            host.ui.post(lambda: host.connected_topics.append(topic))
+
+        given = {
+            "set_queue_on_main_fn": queue_on_main,
+            "set_on_ssdp_msg_fn": ssdp,
+            "set_on_local_connect_fn": local_connect,
+            "set_on_local_message_fn": local_message,
+            "set_on_printer_connected_fn": printer_connected,
+        }
+        for setter in AGENT_CALLBACK_SETTERS:
+            self.agent_call(setter, given.get(setter, lambda *args: None))
+            if setter == "set_queue_on_main_fn":
+                self.queue_on_main_set = True
+        self.agent_call("start_discovery", True, False)
+
+    def connect_device(self, dev_id: str, access_code: str = "12345678"):
+        """``DeviceManager::set_selected_machine`` -> ``connect_printer`` on the UI thread."""
+        return self.agent_call("connect_printer", PrinterConnectionParams(dev_id=dev_id, password=access_code))
+
+    def settle(self) -> None:
+        """Let the UI thread run what was posted to it so far."""
+        self.ui.call(lambda: None)
+
     def lifecycle(self, event_name: str):
         for name, instance in self.loaded["capabilities"].items():
             event = getattr(self.orca.LifecycleEvent, event_name)
@@ -386,7 +475,12 @@ class Host:
         orca.register_capability = register_capability
         orca.request_permissions = request_permissions
         orca.LifecycleEvent = enum.Enum("LifecycleEvent", "PresetSelected PresetSaved ProjectOpened")
-        orca.printer_agent = types.SimpleNamespace(PrinterAgentBase=PrinterAgentBase, AgentInfo=AgentInfo)
+        orca.printer_agent = types.SimpleNamespace(
+            PrinterAgentBase=PrinterAgentBase,
+            AgentInfo=AgentInfo,
+            CameraStreamMode=CameraStreamMode,
+            PrinterConnectionParams=PrinterConnectionParams,
+        )
         orca.pages = types.SimpleNamespace(PagesPluginCapabilityBase=PagesPluginCapabilityBase)
 
         def storage():
@@ -399,7 +493,7 @@ class Host:
         def app_info():
             if not getattr(_local, "ui", False):
                 raise RuntimeError("app_info() must be called from the UI thread")
-            return {"version": "2.5.0-rc", "language": "en"}
+            return {"version": "2.5.0-rc", "language": host.language}
 
         def push_notification(level, text, hyper_text="", on_click=None):
             record = {"level": level, "text": text, "hyper_text": hyper_text, "on_click": on_click, "active": True}

@@ -451,16 +451,20 @@ class Fleet:
             self._stop.wait(LOOP_SECONDS)
 
     def stop(self, timeout: float = JOIN_SECONDS) -> bool:
-        """Stop the loop, the reads and the relay; ``True`` only if every thread ended in time."""
+        """Stop the relay (its port is free first), the reads and the loop, all within one ``timeout``; ``True`` only
+        if every thread ended in time. A read still out is bounded by the transport's timeout and its answer is
+        dropped."""
+        deadline = time.monotonic() + timeout
         self._stop.set()
         with self._lock:
             loop = self._loop
-        ended = self.poller.stop(timeout)
-        if loop is not None:
-            loop.join(timeout)
-            ended = ended and not loop.is_alive()
+        ended = True
         if self.relay is not None:
-            ended = self.relay.stop(timeout) and ended
+            ended = self.relay.stop(max(0.0, deadline - time.monotonic())) and ended
+        ended = self.poller.stop(max(0.0, deadline - time.monotonic())) and ended
+        if loop is not None:
+            loop.join(max(0.0, deadline - time.monotonic()))
+            ended = ended and not loop.is_alive()
         return ended
 
     def open_camera(self, target: Target):

@@ -10,8 +10,10 @@ import collections
 import threading
 from dataclasses import dataclass, field
 
-from . import permits
+from . import i18n, permits
+from .camera_relay import CameraRelay
 from .config import Connection
+from .fleet import Fleet, HostCallbacks
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
 
 NOTIFY_CAPACITY = 32
@@ -266,6 +268,11 @@ class Runtime:
         self._revision = 0
         self._published = 0
         self._seen: dict[str, str] = {}  # this load's baseline of observed settings (H1 review R5)
+        self.language = "en"
+        self.callbacks = HostCallbacks()
+        self.relay = CameraRelay(lambda target: self.fleet.open_camera(target))
+        self.fleet = Fleet(self.callbacks, self.context, self.say, relay=self.relay)
+        self._fleet_started = False
 
     # -- capabilities and shutdown ---------------------------------------------------------------------------------
 
@@ -318,6 +325,32 @@ class Runtime:
 
     def notify(self, level, text: str, on_click=None, hyper_text: str = "") -> bool:
         return self.notifier.notify(level, text, on_click=on_click, hyper_text=hyper_text)
+
+    # -- language and the fleet --------------------------------------------------------------------------------------
+
+    def set_language(self, code) -> None:
+        """OrcaSlicer's UI language, read on the UI thread (``app_info``) and kept for every later sentence."""
+        self.language = i18n.language(code)
+
+    def say(self, key: str) -> str:
+        return i18n.say(self.language, key)
+
+    def start_fleet(self) -> bool:
+        """The fleet's thread and the camera relay, from the first UI entry on (§4.3); their stop is a shutdown step
+        of their own owner. ``False`` once the fence is up."""
+        with self._lock:
+            if self._stopping:
+                return False
+            first = not self._fleet_started
+            self._fleet_started = True
+        if first:
+            self.on_shutdown("stop", self._stop_fleet)
+            self.fleet.start()
+        return True
+
+    def _stop_fleet(self) -> None:
+        if not self.fleet.stop(STEP_DEADLINE):
+            raise RuntimeError("fleet_threads_alive")  # reported as unfinished: nothing it owns is cleaned up
 
     def shutdown(self, reason: str) -> dict:
         with self._lock:
@@ -393,6 +426,7 @@ class Runtime:
                 self.state_writer.submit(
                     lambda s: permits.record_observation(s, changed, first, basis), self._reconsider
                 )
+        self.fleet.rebind(snapshot)  # outside the lock; an older snapshot arriving later is ignored there
         return snapshot
 
     def _publish(self, base: Settings, current: Effective, slots: dict, blocked, revision: int) -> Snapshot:
@@ -432,8 +466,10 @@ class Runtime:
             if self._stopping or self.snapshot is not snapshot:
                 return
             blocked = _blocked(snapshot.effective, state, self.requested)
-            if blocked != snapshot.blocked:
-                self._publish(snapshot.base, snapshot.effective, snapshot.slots, blocked, snapshot.revision)
+            if blocked == snapshot.blocked:
+                return
+            decided = self._publish(snapshot.base, snapshot.effective, snapshot.slots, blocked, snapshot.revision)
+        self.fleet.rebind(decided)
 
     def adopt_storage(self, storage: str) -> None:
         """The host's storage folder, taken in ``on_load``, when import could not derive it."""
