@@ -34,10 +34,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field, fields
+
+from .locking import FileLock
 
 PHASES = ("prepared", "uploading", "uploaded", "submitting", "accepted", "unknown", "finished", "upload_only")
 SCHEMA = 2
@@ -55,76 +56,6 @@ class JournalError(ValueError):
     """A record this code must not write: a newer format, another namespace's record, a stale snapshot, a damaged
     or missing file, a new record where a file already is (``exists``), a ``mutate`` that changed what the record is
     (``identity``), a lock another writer holds too long (``busy``), or a value outside the schema."""
-
-
-if os.name == "nt":
-    import msvcrt
-
-    def _try_lock(handle) -> bool:
-        handle.seek(0)
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
-        return True
-
-    def _unlock(handle) -> None:
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-
-else:
-    import fcntl
-
-    def _try_lock(handle) -> bool:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return False
-        return True
-
-    def _unlock(handle) -> None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
-
-
-class _FolderLock:
-    """The namespace folder's write lock: one thread of this process, then the OS lock other processes honour."""
-
-    def __init__(self, folder: str, timeout: float):
-        self._path = os.path.join(folder, LOCK_FILE)
-        self._timeout = timeout
-        with _THREAD_LOCKS_GUARD:
-            self._thread_lock = _THREAD_LOCKS.setdefault(os.path.normcase(self._path), threading.Lock())
-        self._handle = None
-
-    def __enter__(self):
-        deadline = time.monotonic() + self._timeout
-        if not self._thread_lock.acquire(timeout=self._timeout):
-            raise JournalError("busy")
-        try:
-            self._handle = open(self._path, "a+b")
-            while not _try_lock(self._handle):
-                if time.monotonic() >= deadline:
-                    raise JournalError("busy")
-                time.sleep(0.02)
-        except BaseException:
-            if self._handle is not None:
-                self._handle.close()
-                self._handle = None
-            self._thread_lock.release()
-            raise
-        return self
-
-    def __exit__(self, *exc) -> None:
-        try:
-            _unlock(self._handle)
-        finally:
-            self._handle.close()
-            self._handle = None
-            self._thread_lock.release()
 
 
 def _read_durable(path: str) -> dict | None:
@@ -335,8 +266,8 @@ class Journal:
         self.save(record)
         return record
 
-    def _lock(self) -> _FolderLock:
-        return _FolderLock(self.folder, self._lock_timeout)
+    def _lock(self) -> FileLock:
+        return FileLock(os.path.join(self.folder, LOCK_FILE), self._lock_timeout, busy=lambda: JournalError("busy"))
 
     @staticmethod
     def _write(path: str, record: Record) -> None:
