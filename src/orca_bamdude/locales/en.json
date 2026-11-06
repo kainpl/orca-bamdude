@@ -1,0 +1,8 @@
+{
+  "connect": {
+    "foreign": "This printer belongs to an earlier BamDude connection. Choose the printer again in the device list.",
+    "setup": "BamDude has no usable connection. Open the BamDude tab to check its settings.",
+    "restart": "OrcaSlicer has not allowed this BamDude server yet. The BamDude tab says how to allow it.",
+    "refused": "The BamDude server refused the connection. Check the API key in the BamDude tab."
+  }
+}

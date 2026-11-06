@@ -48,6 +48,7 @@ def test_the_wheel_holds_the_package_and_its_licence_and_nothing_else(tmp_path):
     dist_info = {f"{DIST_INFO}/{name}" for name in ("METADATA", "WHEEL", "top_level.txt", "RECORD", "licenses/LICENSE")}
 
     assert set(members) == package | dist_info
+    assert {"orca_bamdude/locales/en.json", "orca_bamdude/locales/uk.json"} <= set(members)  # read as files
     assert members[f"{DIST_INFO}/licenses/LICENSE"] == (ROOT / "LICENSE").read_bytes()
     assert members[f"{DIST_INFO}/top_level.txt"] == b"orca_bamdude\n"
     assert b"Tag: py3-none-any" in members[f"{DIST_INFO}/WHEEL"]
