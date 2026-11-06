@@ -2,8 +2,9 @@
 
 Host spec r2.3.2 §5.1-§5.3 and §8.2. One ``Fleet`` lives for a load; ``rebind`` gives it each new settings snapshot.
 A new generation forgets what was read under the old one -- capabilities, the device map, a status -- instead of
-carrying it over (§4.4 ⟨R23.1-M1⟩). A selected device keeps its id, and keeps working only if the new binding yields
-that same id: a changed CA or proxy header is the same target (§4.4), anything else ends it at its next read.
+carrying it over (§4.4 ⟨R23.1-M1⟩), and cancels the old generation's reads. A selected device keeps its id, and keeps
+working only if the new binding yields that same id: a changed CA or proxy header is the same target (§4.4),
+anything else ends it at its next read.
 
 Reads go through the plugin's one ``Poller`` and only while something wants them (§8.2):
 
@@ -13,16 +14,31 @@ Reads go through the plugin's one ``Poller`` and only while something wants them
 - ``status`` -- capabilities and the one connected device's status, every 5 s while a device is selected, *stale or
   not*: freshness decides what is pushed, never whether the next read happens, so the device recovers without the
   tab and without a gesture (⟨M-R1⟩). A read is accepted only when the binding it derives still yields the device's
-  id (a restore, another key or another address end it) and the status names the device's printer identity (an id
-  the database gave to a new printer is not that printer).
+  id (a restore, another key or another address end it) and the status names the device's printer identity. A status
+  that names *another* printer proves the id was given to someone else and revokes the device at once; a status that
+  is merely missing only ages.
 
 The transport is fresh while the last accepted status is younger than ``STALE_SECONDS``. While fresh the connected
 device gets a full report every ``PUSH_SECONDS``; while stale nothing is pushed, and OrcaSlicer itself shows the
 device offline about 30 s after the last report -- about a minute after the server last answered (RF-11). No "lost"
 is ever sent. A read that is halted (401, 403, TLS, an incompatible server) stays halted until the settings change.
 
-Host callbacks are called from the fleet's threads -- the host re-posts each through ``CallAfter`` (rc
-``GUI_App::init_networking_callbacks``) -- and never after the load's fence.
+**Contexts** (H2 review R2). Every read carries the generation and the *era* it started in; the era moves with each
+generation and whenever a read proves the namespace changed under the same settings (a restore at the same address),
+so an older read can never bring the rejected namespace back. Every host message carries a stamp of what it was
+computed under -- generation, era, the device and whether it must be connected or fresh, the device map -- and is
+checked against the fleet as it is *at the moment it is handed over*, under a publication lock that ``rebind`` takes
+too: a message computed before a rebind and handed over after it is dropped. The host's callbacks re-post through
+``CallAfter`` and return at once (rc ``GUI_App::init_networking_callbacks``), so holding that lock across one is safe.
+
+**The camera** (R1). The camera is admitted for the connected, fresh device whose key may watch, and the admission is
+the fleet's: the relay asks for it at every request, every upstream open and every renewal (``camera_admits``), the
+fleet's own ``open_camera`` asks again, and every loop step takes the relay's target down once it is no longer
+admitted -- so a kept address, a stale device, a disconnect, another binding, a lost right or the fence opens nothing
+and ends what plays.
+
+**Shutdown** (R3). ``stop`` closes the current client first -- every read in flight ends and none starts -- then the
+relay, the reads' threads and the loop, within one deadline.
 """
 
 from __future__ import annotations
@@ -38,7 +54,7 @@ from .api import Capabilities, ConnectorClient
 from .camera_relay import Target
 from .devices import Binding, Device, DeviceMap, dev_id, device_map
 from .poller import STALE_SECONDS, Poller
-from .transport import Transport
+from .transport import Transport, TransportError
 
 PUSH_SECONDS = 3.0
 STATUS_SECONDS = 5.0
@@ -77,16 +93,38 @@ class HostCallbacks:
 
 @dataclass(frozen=True)
 class _Read:
-    """What a read started under: answers of an older generation, or about another device, are dropped."""
+    """What a read started under: answers of another generation or era, or about another device, are dropped."""
 
     generation: int
+    era: int
     base_url: str
     device: Device | None
+
+
+@dataclass(frozen=True)
+class _Stamp:
+    """What a host message was computed under; it is handed over only while all of it still holds."""
+
+    generation: int
+    era: int
+    device: str | None = None  # the dev_id it is about: still the selected device
+    connected: bool = False  # ... and connected
+    fresh: bool = False  # ... and fresh
+    devices: DeviceMap | None = None  # the map it announces: still the current one
 
 
 def default_client(snapshot) -> ConnectorClient | None:
     connection = getattr(snapshot, "connection", None)
     return ConnectorClient(Transport(connection)) if connection is not None else None
+
+
+def _close(client) -> None:
+    close = getattr(client, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:  # noqa: BLE001 -- a client that cannot close is left to its timeout
+            pass
 
 
 class Fleet:
@@ -109,7 +147,9 @@ class Fleet:
         self.relay = relay
         self._client_factory = client_factory
         self._lock = threading.Lock()
+        self._publication = threading.RLock()  # held from a stamp's check to its hand-over; rebind takes it too
         self._generation = 0
+        self._era = 0
         self._snapshot = None
         self._client: ConnectorClient | None = None
         self._capabilities: Capabilities | None = None
@@ -118,11 +158,12 @@ class Fleet:
         self._list_once = False
         self._waiting: str | None = None  # a connect waiting for the list: the dev_id it named
         self._target: Device | None = None  # the selected device of the current map
-        self._connected = False  # the connect sequence was sent for ``_target``
+        self._connected = False  # the connect sequence was handed to the host for ``_target``
         self._reread_asked = False  # the list was re-read for this target once already (a missing status)
         self._status: dict | None = None
         self._status_at: float | None = None
         self._firmware: str | None = None
+        self._camera: Target | None = None  # the camera target this fleet admitted, for ``_target``
         self._last_push = 0.0
         self._seq = 0
         self._access_code = ""
@@ -138,29 +179,68 @@ class Fleet:
         if snapshot is None:
             return
         refused = None
-        with self._lock:
-            if snapshot.generation <= self._generation:
-                return
-            self._generation, self._snapshot = snapshot.generation, snapshot
-            self._client = self._client_factory(snapshot)
-            self._capabilities, self._map = None, None
-            self._status, self._status_at, self._firmware = None, None, None
-            self._reread_asked = False
-            # A connect still waiting cannot be answered now: it hears what to do. A connected device keeps its
-            # selection and goes quiet; it comes back when a connection does.
-            pending = self._waiting is not None or (self._target is not None and not self._connected)
-            if self._client is None and pending:
-                refused = (self._waiting or self._target.dev_id, self._blocked_message())
-                self._waiting, self._target = None, None
-            self.poller.configure(generation=snapshot.generation, poll_min_seconds=0)
-        if self.relay is not None:
-            self.relay.rotate()
-        if refused is not None:
-            self._emit("local_connect", FAILED, *refused)
+        with self._publication:
+            with self._lock:
+                if snapshot.generation <= self._generation:
+                    return
+                self._generation, self._snapshot = snapshot.generation, snapshot
+                self._era += 1
+                old, self._client = self._client, self._client_factory(snapshot)
+                self._capabilities, self._map = None, None
+                self._status, self._status_at, self._firmware = None, None, None
+                self._reread_asked = False
+                self._camera = None
+                # A connect still waiting cannot be answered now: it hears what to do. A connected device keeps its
+                # selection and goes quiet; it comes back when a connection does.
+                pending = self._waiting is not None or (self._target is not None and not self._connected)
+                if self._client is None and pending:
+                    refused = (self._waiting or self._target.dev_id, self._blocked_message())
+                    self._waiting, self._target = None, None
+                self.poller.configure(generation=snapshot.generation, poll_min_seconds=0)
+                stamp = self._stamp_locked()
+            _close(old)  # the older generation's reads end now; their answers would be dropped anyway
+            if self.relay is not None:
+                self.relay.rotate()
+                self.relay.set_target(None)
+            if refused is not None:
+                self._emit("local_connect", stamp, FAILED, *refused)
         self._update_wants()
 
     def _blocked_message(self) -> str:
         return self.say(_BLOCKED_MESSAGE.get(getattr(self._snapshot, "blocked", None), "connect.setup"))
+
+    # -- stamps and the hand-over to the host --------------------------------------------------------------------------
+
+    def _stamp_locked(self, device: Device | None = None, *, connected=False, fresh=False, devices=None) -> _Stamp:
+        return _Stamp(
+            self._generation,
+            self._era,
+            device.dev_id if device is not None else None,
+            connected,
+            fresh,
+            devices,
+        )
+
+    def _holds_locked(self, stamp: _Stamp) -> bool:
+        if stamp.generation != self._generation or stamp.era != self._era:
+            return False
+        if stamp.device is not None:
+            if self._target is None or self._target.dev_id != stamp.device:
+                return False
+            if stamp.connected and not self._connected:
+                return False
+            if stamp.fresh and not self._fresh_locked():
+                return False
+        return stamp.devices is None or stamp.devices is self._map
+
+    def _emit(self, name: str, stamp: _Stamp, *args) -> bool:
+        """Hand one message to the host if what it was computed under still holds. ``False`` when it was dropped."""
+        with self._publication:
+            with self._lock:
+                holds = self._holds_locked(stamp)
+            if not holds or self.context.closed:
+                return False
+            return self.callbacks.call(name, *args)
 
     # -- what OrcaSlicer asks ------------------------------------------------------------------------------------------
 
@@ -188,6 +268,7 @@ class Fleet:
             self._access_code = access_code or ""
             self._waiting, self._target, self._connected = None, None, False
             self._status, self._status_at, self._reread_asked = None, None, False
+            self._camera = None
             if self._client is None:
                 refused = self._blocked_message()
             elif self._map is None:
@@ -198,10 +279,10 @@ class Fleet:
                     refused = self.say("connect.foreign")
                 else:
                     wake = "status"
-        if self.relay is not None:
-            self.relay.set_target(None)
+            stamp = self._stamp_locked()
+        self._take_camera_down()
         if refused is not None:
-            self._emit("local_connect", FAILED, device_id, refused)
+            self._emit("local_connect", stamp, FAILED, device_id, refused)
         self._update_wants()
         if wake is not None:
             self.poller.wake(wake)
@@ -211,8 +292,8 @@ class Fleet:
         with self._lock:
             self._waiting, self._target, self._connected = None, None, False
             self._status, self._status_at = None, None
-        if self.relay is not None:
-            self.relay.set_target(None)
+            self._camera = None
+        self._take_camera_down()
         self._update_wants()
         return OK
 
@@ -230,29 +311,84 @@ class Fleet:
             mine = self._target is not None and self._target.dev_id == device_id and self._connected
             fresh = mine and self._fresh_locked()
             code, firmware = self._access_code, self._firmware
+            stamp = self._stamp_locked(self._target, connected=True) if mine else None
+            fresh_stamp = self._stamp_locked(self._target, connected=True, fresh=True) if fresh else None
         if section == "system" and command == "get_access_code":
-            if mine:
+            if stamp is not None:
                 reply = json.dumps({"system": {"command": command, "access_code": code}})
-                self._emit("local_message", device_id, reply)
+                self._emit("local_message", stamp, device_id, reply)
             return OK
         if section == "pushing" or command in _REPLIED:
-            if fresh:
+            if fresh_stamp is not None:
                 if command == "get_version":
-                    self._emit("local_message", device_id, dialect.version_reply(firmware))
+                    self._emit("local_message", fresh_stamp, device_id, dialect.version_reply(firmware))
                 self._push(force=True)
             return OK
         return ERR_NOT_SUPPORTED
 
-    def camera_url(self) -> str:
-        """The relay's address for the connected, fresh device whose key may watch; otherwise empty."""
+    # -- the camera (R1) -------------------------------------------------------------------------------------------------
+
+    def _camera_device_locked(self) -> Device | None:
+        """The device whose camera may be watched now: connected, fresh, and the key may watch."""
+        if self._target is None or not self._connected or not self._fresh_locked():
+            return None
+        if self._capabilities is None or not self._capabilities.allows("camera_stream"):
+            return None
+        return self._target
+
+    def camera_admits(self, target: Target) -> bool:
+        """The relay's question at every request, open and renewal: is this still the admitted camera?"""
         with self._lock:
-            device = self._target if self._connected and self._fresh_locked() else None
-            allowed = self._capabilities is not None and self._capabilities.allows("camera_stream")
-        if self.relay is None or device is None or not allowed:
+            device = self._camera_device_locked()
+            return (
+                device is not None
+                and not self.context.closed
+                and self._camera == target
+                and target == Target(device.printer_id, device.identity)
+            )
+
+    def camera_url(self) -> str:
+        """The relay's address for the admitted camera; otherwise empty, and the relay's target is taken down."""
+        with self._lock:
+            device = self._camera_device_locked()
+            target = Target(device.printer_id, device.identity) if device is not None else None
+            self._camera = target
+        if self.relay is None or target is None or self.context.closed:
+            self._take_camera_down()
             return ""
-        target = Target(device.printer_id, device.identity)
         self.relay.set_target(target)
+        if not self.camera_admits(target):  # a rebind or a loss between the decision and the relay
+            self._take_camera_down(target)
+            return ""
         return self.relay.url_for(target) or ""
+
+    def _take_camera_down(self, only: Target | None = None) -> None:
+        if self.relay is None:
+            return
+        current = self.relay.target
+        if current is not None and (only is None or current == only):
+            self.relay.set_target(None)
+
+    def _revoke_camera(self) -> None:
+        """Every loop step: a camera no longer admitted is ended, the playing viewer with it."""
+        if self.relay is None:
+            return
+        current = self.relay.target
+        if current is not None and not self.camera_admits(current):
+            with self._lock:
+                if self._camera == current:
+                    self._camera = None
+            self._take_camera_down(current)
+
+    def open_camera(self, target: Target):
+        """The relay's upstream, opened by the current generation's client -- only for the admitted camera."""
+        with self._lock:
+            client = self._client
+        if client is None or not self.camera_admits(target):
+            raise TransportError("not_admitted")
+        return client.open_camera(target.printer_id, target.identity)
+
+    # -- jobs ------------------------------------------------------------------------------------------------------------
 
     def admit_job(self, device_id: str):
         """Before a job reads anything: the device it names, or why not -- ``foreign`` or ``stale`` -- fail-closed
@@ -311,18 +447,27 @@ class Fleet:
             client = self._client
             if client is None:
                 raise RuntimeError("no connection")
-            return _Read(self._generation, self._snapshot.connection.base_url, device), client
+            return _Read(self._generation, self._era, self._snapshot.connection.base_url, device), client
+
+    def _stopping(self) -> bool:
+        return self._stop.is_set() or self.context.closed
 
     def _fetch_printers(self):
         read, client = self._started(None)
-        return read, client.capabilities(), client.printers()
+        capabilities = client.capabilities()
+        if self._stopping():
+            raise RuntimeError("stopped")  # no next request of the chain after the fence
+        return read, capabilities, client.printers()
+
+    def _current(self, read: _Read) -> bool:
+        return read.generation == self._generation and read.era == self._era
 
     def _deliver_printers(self, value) -> None:
         read, capabilities, printers = value
         refused = None
         with self._lock:
-            if read.generation != self._generation:
-                return  # an answer about a connection that is no longer this one
+            if not self._current(read):
+                return  # an answer about a connection, or a namespace, that is no longer this one
             binding = Binding.of(read.base_url, capabilities)
             self._learn(capabilities)
             self._map = device_map(binding, printers)
@@ -333,18 +478,24 @@ class Fleet:
                 self._target = self._map.get(waiting)
                 if self._target is None:
                     refused = (waiting, self.say("connect.foreign"))
-            elif self._target is not None and self._map.get(self._target.dev_id) is None:
-                # The connected device is gone: deleted, out of the key's scope, or of an earlier binding.
-                if not self._connected:
-                    refused = (self._target.dev_id, self.say("connect.foreign"))
-                self._target, self._connected, self._status, self._status_at = None, False, None, None
+            elif self._target is not None:
+                found = self._map.get(self._target.dev_id)
+                if found is None:
+                    # The connected device is gone: deleted, out of the key's scope, or of an earlier binding.
+                    if not self._connected:
+                        refused = (self._target.dev_id, self.say("connect.foreign"))
+                    self._target, self._connected, self._status, self._status_at = None, False, None, None
+                    self._camera = None
+                elif found != self._target:
+                    self._target = found  # the same printer under the number the server gives it now
             wake = self._target is not None and not self._connected
+            stamp = self._stamp_locked()
+            announce_stamp = self._stamp_locked(devices=self._map)
         for device in announce:
-            self._emit("ssdp", dialect.ssdp(device, binding))
+            self._emit("ssdp", announce_stamp, dialect.ssdp(device, binding))
         if refused is not None:
-            if self.relay is not None:
-                self.relay.set_target(None)
-            self._emit("local_connect", FAILED, *refused)
+            self._take_camera_down()
+            self._emit("local_connect", stamp, FAILED, *refused)
         self._update_wants()
         if wake:
             self.poller.wake("status")
@@ -353,22 +504,35 @@ class Fleet:
         read, client = self._started(self.target)
         if read.device is None:
             raise RuntimeError("no target")
-        return read, client.capabilities(), client.status_batch([read.device.printer_id])
+        capabilities = client.capabilities()
+        if self._stopping():
+            raise RuntimeError("stopped")
+        return read, capabilities, client.status_batch([read.device.printer_id])
 
     def _deliver_status(self, value) -> None:
         read, capabilities, statuses = value
         device = read.device
         reread, sequence = False, None
         with self._lock:
-            if read.generation != self._generation or device is not self._target:
+            if not self._current(read) or device is not self._target:
                 return
             status = statuses.get(device.printer_id) if isinstance(statuses, dict) else None
+            named = status.get("connector_identity") if isinstance(status, dict) else None
             if dev_id(Binding.of(read.base_url, capabilities), device.identity) != device.dev_id:
-                # A restore, another key or another address: the device belongs to the previous binding.
+                # A restore, another key or another address: the device belongs to the previous binding, and so does
+                # every read still in flight -- a new era (R2).
                 self._target, self._connected, self._status, self._status_at, self._map = None, False, None, None, None
+                self._camera = None
+                self._era += 1
                 self._list_once, reread = True, True
-            elif not isinstance(status, dict) or status.get("connector_identity") != device.identity:
-                # Deleted, out of the key's scope, or its id given to another printer: once, see what the list says.
+            elif isinstance(status, dict) and named != device.identity:
+                # The number now names another printer: proven, so the device is revoked at once -- no report, job or
+                # camera on the strength of an older status (R4) -- and the list says what became of it.
+                self._status, self._status_at, self._camera = None, None, None
+                if not self._reread_asked:
+                    self._reread_asked, self._list_once, reread = True, True, True
+            elif not isinstance(status, dict):
+                # Missing (deleted, out of the key's scope): no proof either way; it ages, and the list is read once.
                 if not self._reread_asked:
                     self._reread_asked, self._list_once, reread = True, True, True
             else:
@@ -380,19 +544,27 @@ class Fleet:
                     self._connected, self._last_push = True, self.clock()
                     self._seq += 1
                     report = dialect.push_status(status, seq=self._seq)
-                    sequence = (device.dev_id, dialect.version_reply(self._firmware), report)
+                    stamp = self._stamp_locked(device, connected=True)
+                    sequence = (stamp, device.dev_id, dialect.version_reply(self._firmware), report)
         if reread:
-            if self.relay is not None and self.target is None:
-                self.relay.set_target(None)
+            if self.target is None or not self.fresh:
+                self._take_camera_down()
             self._update_wants()
             self.poller.wake("printers")
             return
         if sequence is not None:
-            connected, version, report = sequence
-            self._emit("local_message", connected, version)
-            self._emit("local_message", connected, report)
-            self._emit("local_connect", OK, connected, "0")
-            self._emit("printer_connected", connected)
+            stamp, connected, version, report = sequence
+            sent = (
+                self._emit("local_message", stamp, connected, version)
+                and self._emit("local_message", stamp, connected, report)
+                and self._emit("local_connect", stamp, OK, connected, "0")
+                and self._emit("printer_connected", stamp, connected)
+            )
+            if not sent:
+                # Not all of it reached the host: the next accepted status of this device sends it again.
+                with self._lock:
+                    if self._target is not None and self._target.dev_id == connected:
+                        self._connected = False
 
     # -- the loop ------------------------------------------------------------------------------------------------------
 
@@ -406,7 +578,8 @@ class Fleet:
             self._last_push = now
             self._seq += 1
             target, report = self._target.dev_id, dialect.push_status(self._status, seq=self._seq)
-        self._emit("local_message", target, report)
+            stamp = self._stamp_locked(self._target, connected=True, fresh=True)
+        self._emit("local_message", stamp, target, report)
 
     def _answer_halted(self) -> None:
         """A connect still waiting while its read is halted (401, 403, TLS, ...) hears the refusal once."""
@@ -417,20 +590,19 @@ class Fleet:
                 waiting, self._target = self._target.dev_id, None
             else:
                 return
-        self._emit("local_connect", FAILED, waiting, self.say("connect.refused"))
+            stamp = self._stamp_locked()
+        self._emit("local_connect", stamp, FAILED, waiting, self.say("connect.refused"))
         self._update_wants()
 
     def tick(self) -> None:
-        """One step of the fleet's loop: start due reads, answer a halted connect, push."""
+        """One step of the fleet's loop: start due reads, answer a halted connect, push, end a camera gone."""
         if self.context.closed:
+            self._revoke_camera()
             return
         self.poller.tick()
         self._answer_halted()
         self._push()
-
-    def _emit(self, name: str, *args) -> None:
-        if not self.context.closed:
-            self.callbacks.call(name, *args)
+        self._revoke_camera()
 
     def start(self) -> None:
         """The fleet's thread and the relay, from the first UI entry on (§4.3). Idempotent."""
@@ -451,13 +623,14 @@ class Fleet:
             self._stop.wait(LOOP_SECONDS)
 
     def stop(self, timeout: float = JOIN_SECONDS) -> bool:
-        """Stop the relay (its port is free first), the reads and the loop, all within one ``timeout``; ``True`` only
-        if every thread ended in time. A read still out is bounded by the transport's timeout and its answer is
-        dropped."""
+        """Cancel the reads in flight (the client is closed first: nothing new starts), then stop the relay -- its
+        port is free -- the reads' threads and the loop, all within one ``timeout``; ``True`` only if every thread
+        ended in time."""
         deadline = time.monotonic() + timeout
         self._stop.set()
         with self._lock:
-            loop = self._loop
+            loop, client = self._loop, self._client
+        _close(client)
         ended = True
         if self.relay is not None:
             ended = self.relay.stop(max(0.0, deadline - time.monotonic())) and ended
@@ -466,14 +639,6 @@ class Fleet:
             loop.join(max(0.0, deadline - time.monotonic()))
             ended = ended and not loop.is_alive()
         return ended
-
-    def open_camera(self, target: Target):
-        """The relay's upstream: the current generation's client opens the farm's stream for the chosen printer."""
-        with self._lock:
-            client = self._client
-        if client is None:
-            raise RuntimeError("no connection")
-        return client.open_camera(target.printer_id, target.identity)
 
 
 __all__ = ["Fleet", "HostCallbacks", "PUSH_SECONDS", "STALE_SECONDS", "default_client"]

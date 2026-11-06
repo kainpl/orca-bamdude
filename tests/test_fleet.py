@@ -96,6 +96,10 @@ class Server:
 class Client:
     def __init__(self, server, base_url):
         self.server, self.base_url = server, base_url
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def capabilities(self):
         return self.server.capabilities()
@@ -647,7 +651,11 @@ def test_no_camera_without_the_keys_right(rig):
 
 def test_the_relay_opens_the_stream_through_the_current_generations_client(rig):
     rig.connected()
-    rig.fleet.rebind(snapshot(2, base="https://farm.example/bamdude"))
+    rig.fleet.rebind(snapshot(2, base="https://farm.example/bamdude"))  # the same binding, a new generation
+    with pytest.raises(TransportError):  # nothing of the new generation is accepted yet: not admitted
+        rig.fleet.open_camera(Target(1, IDENTITY))
+    rig.step()
+    assert rig.fleet.camera_url()
     assert rig.fleet.open_camera(Target(1, IDENTITY)) == "stream"
     assert rig.server.calls[-1] == ("camera", 1, IDENTITY, "https://farm.example/bamdude")
 

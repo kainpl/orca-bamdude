@@ -42,6 +42,14 @@ class ConnectorClient:
     def __init__(self, transport: Transport):
         self.transport = transport
 
+    def close(self) -> None:
+        """End every request in flight and refuse every new one (the owner's unload or a new generation)."""
+        self.transport.close()
+
+    @property
+    def closed(self) -> bool:
+        return self.transport.closed
+
     def capabilities(self) -> Capabilities:
         _status, body = self.transport.request_json("GET", "/api/v1/connector/capabilities")
         if not isinstance(body, dict) or body.get("product") != "bamdude":

@@ -270,7 +270,10 @@ class Runtime:
         self._seen: dict[str, str] = {}  # this load's baseline of observed settings (H1 review R5)
         self.language = "en"
         self.callbacks = HostCallbacks()
-        self.relay = CameraRelay(lambda target: self.fleet.open_camera(target))
+        self.relay = CameraRelay(
+            lambda target: self.fleet.open_camera(target),
+            admits=lambda target: self.fleet.camera_admits(target),  # asked at every request, open and renewal
+        )
         self.fleet = Fleet(self.callbacks, self.context, self.say, relay=self.relay)
         self._fleet_started = False
 
