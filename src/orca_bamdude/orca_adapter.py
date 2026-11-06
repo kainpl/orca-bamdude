@@ -20,7 +20,7 @@ from pathlib import PurePath
 
 import orca
 
-from . import __version__, permits
+from . import __version__, locking, permits
 from .config import ConfigError
 from .service import Runtime
 from .settings import apply_edit, effective, parse_base, user_targets
@@ -62,8 +62,8 @@ def read_base(facts: dict) -> dict | None:
     if not facts["data_dir"] or not facts["plugin_key"]:
         return None
     try:
-        with open(os.path.join(facts["data_dir"], "orca_plugins", "config.json"), encoding="utf-8") as handle:
-            root = json.load(handle)
+        # OrcaSlicer (or a second one closing down) may be replacing the file: a sharing violation is waited out.
+        root = json.loads(locking.read_text(os.path.join(facts["data_dir"], "orca_plugins", "config.json")))
     except (OSError, ValueError):
         return None
     entries = root.get("config") if isinstance(root, dict) else None

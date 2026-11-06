@@ -72,6 +72,26 @@ def test_a_base_stored_as_a_json_string_is_read_the_same(host):
     assert "https://farm.example" in host.requests[0]["network"]
 
 
+def test_the_base_read_while_orca_saves_its_config_is_still_the_base(host, monkeypatch):
+    # OrcaSlicer (or a second one closing down) may replace orca_plugins/config.json while it is read; on Windows that
+    # read fails with a sharing violation, which must not look like "no settings" (H2 review, same class as d18e919).
+    host.write_base(AGENT, BASE)
+    assert host.load()
+    locking = sys.modules["orca_bamdude.locking"]
+    real_open, calls = open, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_open(*args, **kwargs)
+
+    for module in (locking, adapter(host)):  # whichever reads the file meets the violation first
+        monkeypatch.setattr(module, "open", flaky, raising=False)
+    monkeypatch.setattr(locking.time, "sleep", lambda s: None)
+    assert adapter(host).read_base(adapter(host).INSTALL)["server_url"] == "https://farm.example"
+
+
 def test_storage_is_the_derived_folder_and_on_load_completes_the_marker(host):
     host.write_base(AGENT, BASE)
     assert host.load()
