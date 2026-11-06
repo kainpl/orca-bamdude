@@ -28,6 +28,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -45,11 +46,20 @@ class NotificationLevel(enum.Enum):
     ErrorNotificationLevel = 4
 
 
+PENDING, CLAIMED, ABANDONED = "pending", "claimed", "abandoned"
+
+
 class UiThread:
-    """OrcaSlicer's UI thread: runs posted calls in order. ``busy`` holds it, as a Cancel's ``wait_for_idle`` does."""
+    """OrcaSlicer's UI thread: runs posted calls in order.
+
+    A posted call is Pending until the UI thread claims it (compare-and-set, as ``run_on_ui_blocking`` does); a
+    caller may abandon it only while it is still Pending, and an abandoned call never runs (H1 review R6).
+    """
 
     def __init__(self):
         self._calls: queue.Queue = queue.Queue()
+        self._state_lock = threading.Lock()
+        self._pending = 0
         self.thread = threading.Thread(target=self._run, name="fake-ui", daemon=True)
         self.thread.start()
 
@@ -59,6 +69,11 @@ class UiThread:
             fn, done = self._calls.get()
             if fn is None:
                 return
+            with self._state_lock:
+                self._pending -= 1
+                if done["state"] != PENDING:
+                    continue
+                done["state"] = CLAIMED
             try:
                 done["result"] = fn()
             except BaseException as exc:  # noqa: BLE001 -- handed back to the caller
@@ -66,9 +81,29 @@ class UiThread:
             done["event"].set()
 
     def post(self, fn) -> dict:
-        done = {"event": threading.Event()}
+        done = {"event": threading.Event(), "state": PENDING}
+        with self._state_lock:
+            self._pending += 1
         self._calls.put((fn, done))
         return done
+
+    def abandon(self, done: dict) -> bool:
+        """The caller gives up -- possible only while the call is still Pending."""
+        with self._state_lock:
+            if done["state"] != PENDING:
+                return False
+            done["state"] = ABANDONED
+            return True
+
+    def wait_pending(self, count: int, timeout: float) -> bool:
+        """For tests: wait until at least ``count`` calls are queued and not yet claimed."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._state_lock:
+                if self._pending >= count:
+                    return True
+            time.sleep(0.005)
+        return False
 
     def call(self, fn, timeout: float = 10.0):
         """Run ``fn`` on the UI thread and wait for it (the test thread stands in for wx's event loop driver)."""
@@ -104,6 +139,9 @@ class Host:
         self.notifications: list[dict] = []
         self.preset_name = "Bambu Lab X1 probe"
         self.preset_overrides: list[dict] = []
+        self.preset_raw: str | None = None  # when set, the envelope string the preset returns as it is
+        self.preset_error: Exception | None = None  # when set, the preset accessor raises it
+        self.preset_reads: list[bool] = []  # one entry per preset read: whether it ran on the UI thread
         self._saved_modules: dict | None = None
         self.orca = self._build_module()
 
@@ -221,6 +259,11 @@ class Host:
         """The page's ``on_message``: UI thread, audited."""
         page = self.capability("BamDude")
         return self.ui.call(lambda: self.audited("BamDude", page.on_message, data))
+
+    def agent_call(self, method: str, *args):
+        """A printer-agent method as OrcaSlicer calls it from its UI (discovery, selection, connection): audited."""
+        agent = self.capability("BamDudePrinter")
+        return self.ui.call(lambda: self.audited("BamDudePrinter", getattr(agent, method), *args))
 
     def lifecycle(self, event_name: str):
         for name, instance in self.loaded["capabilities"].items():
@@ -368,9 +411,11 @@ class Host:
                 host.callbacks.append(record)
             if getattr(_local, "ui", False):
                 return show()
+            if host.closing:
+                raise RuntimeError("OrcaSlicer is closing")
             done = host.ui.post(show)
             while not done["event"].wait(0.05):
-                if host.closing:
+                if host.closing and host.ui.abandon(done):  # only a call still Pending can be given up
                     raise RuntimeError("OrcaSlicer is closing")
             return None
 
@@ -380,17 +425,31 @@ class Host:
 
             def config_value(self, key):
                 if key == "printer_plugin_config_overrides":
+                    if host.preset_raw is not None:
+                        return host.preset_raw
                     return json.dumps(host.preset_overrides) if host.preset_overrides else ""
                 return None
 
+        def edited_preset():
+            if host.preset_error is not None:
+                raise host.preset_error
+            return Preset(host.preset_name)
+
         printers = types.SimpleNamespace(
-            get_edited_preset=lambda: Preset(host.preset_name), get_selected_preset_name=lambda: host.preset_name
+            get_edited_preset=edited_preset, get_selected_preset_name=lambda: host.preset_name
         )
         bundle = types.SimpleNamespace(printers=printers)
+
+        def preset_bundle():
+            # The real accessor has no thread check (PluginHostApp.cpp); the fake records where it was read so a
+            # test can hold the adapter to reading it on the UI thread only (H1 review R3).
+            host.preset_reads.append(bool(getattr(_local, "ui", False)))
+            return bundle
+
         orca.host = types.SimpleNamespace(
             plugin=types.SimpleNamespace(storage=storage),
             app_info=app_info,
-            preset_bundle=lambda: bundle,
+            preset_bundle=preset_bundle,
             ui=types.SimpleNamespace(push_notification=push_notification, NotificationLevel=NotificationLevel),
         )
         return orca

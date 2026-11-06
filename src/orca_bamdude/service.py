@@ -125,11 +125,13 @@ class Snapshot:
     """The settings as the UI thread read them, frozen, with the generation they belong to (§4.4).
 
     ``connection`` is ``None`` whenever the plugin may not talk to that server now; ``blocked`` says why:
-    ``problem`` (a stored or override value does not validate), ``missing`` (no address or no key), ``held`` (an
-    unfinished load held the target, §4.1 ⟨R23-B2⟩) or ``needs_restart`` (this load did not ask for it).
+    ``problem`` (a stored or override value does not validate, or the override could not be read), ``missing`` (no
+    address or no key), ``held`` (an unfinished load held the target, §4.1 ⟨R23-B2⟩) or ``needs_restart`` (this load
+    did not ask for it).
     """
 
     generation: int
+    revision: int
     base: Settings = field(repr=False)
     effective: Effective = field(repr=False)
     connection: Connection | None = field(repr=False)
@@ -145,6 +147,79 @@ class Snapshot:
         return self.effective.preset_name
 
 
+class StateWriter:
+    """The one thread that writes ``state.json`` for this load, in order (H1 review R4).
+
+    The state file is shared by OrcaSlicer's overlapping processes, so a write waits for the file lock and syncs to
+    disk. Neither may happen on the UI thread: ``submit`` queues the change and returns at once, and ``done`` is told
+    whether it was recorded -- an intent is never shown as saved before it is. After the fence nothing new is
+    accepted; what was accepted before it is written by ``drain``.
+    """
+
+    def __init__(self, storage: str | None, name: str = "bamdude-state"):
+        self._storage = storage
+        self._name = name
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        self._queue: collections.deque = collections.deque()
+        self._closed = False
+        self._busy = False
+        self.thread: threading.Thread | None = None
+
+    def submit(self, change, done=None) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            self._queue.append((change, done))
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self.thread.start()
+            self._wake.notify_all()
+            return True
+
+    def adopt(self, storage: str) -> None:
+        with self._lock:
+            if self._storage is None:
+                self._storage = storage
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until everything accepted so far is written. Never call it on the UI thread."""
+        with self._lock:
+            return self._wake.wait_for(lambda: not self._queue and not self._busy, timeout)
+
+    def drain(self, timeout: float) -> bool:
+        """Accept nothing more and write what was accepted, within ``timeout``."""
+        with self._lock:
+            self._closed = True
+            self._wake.notify_all()
+            return self._wake.wait_for(lambda: not self._queue and not self._busy, timeout)
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                while not self._queue and not self._closed:
+                    self._wake.wait()
+                if not self._queue:
+                    return
+                change, done = self._queue.popleft()
+                self._busy = True
+            recorded = False
+            try:
+                if self._storage is not None:
+                    permits.update_state(self._storage, change)
+                    recorded = True
+            except Exception:  # noqa: BLE001 -- a busy lock or a full disk: reported to ``done``, never raised
+                recorded = False
+            if done is not None:
+                try:
+                    done(recorded)
+                except Exception:  # noqa: BLE001
+                    pass
+            with self._lock:
+                self._busy = False
+                self._wake.notify_all()
+
+
 class Runtime:
     """One per load, shared by the agent and the page capability (§4.5 ⟨A6⟩).
 
@@ -152,9 +227,12 @@ class Runtime:
     1. close admission;
     2. raise the load's fence (callbacks and the notifier go quiet);
     3. wake every waiter;
-    4. run the ``cancel``, then ``stop``, then ``cleanup`` steps, each with a deadline.
+    4. run the ``cancel`` steps, then the ``stop`` steps and the state writer's drain, each with a deadline;
+    5. run the ``cleanup`` steps only when every cancel and stop step finished and no admitted operation is still
+       running (H1 review R2). A step past its deadline keeps running and keeps its resources; it is reported as
+       unfinished and nothing it owns is cleaned up.
 
-    The UI thread never waits without a deadline, and never for the notifier.
+    The UI thread never waits without a deadline, never for the notifier and never for the state file's lock.
     """
 
     def __init__(self, push, storage: str | None, load_id: str, requested: set[str], decision: dict):
@@ -165,6 +243,7 @@ class Runtime:
         self.requested = frozenset(requested)
         self.decision = dict(decision)
         self.snapshot: Snapshot | None = None
+        self.state_writer = StateWriter(storage)
         self._lock = threading.Lock()
         self._attached: set[str] = set()
         self._stopping = False
@@ -174,6 +253,9 @@ class Runtime:
         self._steps: list[tuple[int, str, object, float]] = []
         self._generation = 0
         self._generation_key = None
+        self._revision = 0
+        self._published = 0
+        self._seen: dict[str, str] = {}  # this load's baseline of observed settings (H1 review R5)
 
     # -- capabilities and shutdown ---------------------------------------------------------------------------------
 
@@ -232,7 +314,6 @@ class Runtime:
             repeated = self._stopping
             self._stopping = True
             waiters = list(self._waiters)
-            admitted = len(self._admitted)
             steps = sorted(self._steps, key=lambda step: step[0])
         if repeated:
             return {"reason": reason, "repeated": True}
@@ -244,69 +325,108 @@ class Runtime:
             except Exception:  # noqa: BLE001 -- one waiter never stops the others
                 pass
         results: dict[str, str] = {}
-        for _order, stage, fn, deadline in steps:
-            name = stage if stage not in results else f"{stage}:{sum(k.startswith(stage) for k in results)}"
+        unfinished: list[str] = []
+        for _order, stage, fn, deadline in [s for s in steps if s[1] != "cleanup"]:
+            name = _step_name(results, stage)
             results[name] = _run_step(fn, deadline)
-        return {"reason": reason, "repeated": False, "waiters": len(waiters), "admitted": admitted, "steps": results}
+            if results[name] == "deadline":
+                unfinished.append(name)
+        if not self.state_writer.drain(STEP_DEADLINE):
+            unfinished.append("state")
+        owners_done = not unfinished and all(r == "ok" for r in results.values()) and not self._running()
+        for _order, stage, fn, deadline in [s for s in steps if s[1] == "cleanup"]:
+            name = _step_name(results, stage)
+            results[name] = _run_step(fn, deadline) if owners_done else "skipped"
+        return {
+            "reason": reason,
+            "repeated": False,
+            "waiters": len(waiters),
+            "admitted": self._running(),
+            "steps": results,
+            "unfinished": unfinished,
+        }
+
+    def _running(self) -> int:
+        with self._lock:
+            return len(self._admitted)
 
     # -- settings, generation and permission targets ---------------------------------------------------------------
 
-    def apply_settings(self, base_raw, override_raw, preset_name: str | None) -> Snapshot:
-        """Freeze what the UI thread read; a change of anything that reaches the server is a new generation."""
-        base = parse_base(base_raw)
-        current = effective(base, override_raw, preset_name)
-        slots = slot_targets(base, current)
-        self._observe(slots)
-        blocked = self._blocked(current)
-        connection = current.connection if blocked is None else None
-        key = (
-            current.source,
-            current.preset_name,
-            current.server_url,
-            current.ca_pem,
-            base.api_key,
-            base.headers,
-            blocked,
-        )
+    def apply_settings(self, base_raw, override_raw, preset_name: str | None, override_error: str | None = None):
+        """Freeze what the UI thread read; a change of anything that reaches the server is a new generation.
+
+        Each call takes a revision as it starts; a read that finishes after a newer one was published, or after the
+        fence, publishes nothing and returns ``None`` (H1 review R3). Observations are compared with this load's own
+        baseline and handed to the state writer -- no file lock on the caller's thread (R4, R5).
+        """
         with self._lock:
+            if self._stopping:
+                return None
+            self._revision += 1
+            revision = self._revision
+        base = parse_base(base_raw)
+        current = effective(base, override_raw, preset_name, override_error)
+        slots = slot_targets(base, current)
+        state = permits.read_state(self.storage) if self.storage else {}
+        with self._lock:
+            if self._stopping or revision < self._published:
+                return None
+            changed = [t for s, t in sorted(slots.items()) if s in self._seen and self._seen[s] != t]
+            first = [t for s, t in sorted(slots.items()) if s not in self._seen]
+            self._seen.update(slots)
+            blocked = _blocked(current, state, changed, self.requested)
+            connection = current.connection if blocked is None else None
+            key = (
+                current.source,
+                current.preset_name,
+                current.server_url,
+                current.ca_pem,
+                base.api_key,
+                base.headers,
+                blocked,
+            )
             if key != self._generation_key:
                 self._generation += 1
                 self._generation_key = key
-            snapshot = Snapshot(self._generation, base, current, connection, blocked, slots)
+            snapshot = Snapshot(self._generation, revision, base, current, connection, blocked, slots)
             self.snapshot = snapshot
+            self._published = revision
+            if changed or first:
+                self.state_writer.submit(lambda s: permits.record_observation(s, changed, first))
         return snapshot
 
-    def _blocked(self, current: Effective) -> str | None:
-        if current.problems:
-            return "problem"
-        if current.connection is None:
-            return "missing"
-        target = f"network:{origin(current.server_url)}"
-        if target in self.held():
-            return "held"
-        if target not in self.requested:
-            return "needs_restart"
-        return None
-
-    def _observe(self, slots: dict) -> None:
+    def adopt_storage(self, storage: str) -> None:
+        """The host's storage folder, taken in ``on_load``, when import could not derive it."""
         if self.storage is None:
-            return
-        state = permits.read_state(self.storage)
-        if permits.observe(state, slots)[0] != state:
-            self.update_state(lambda s: permits.observe(s, slots)[0])
+            self.storage = storage
+            self.state_writer.adopt(storage)
 
     def held(self) -> set[str]:
+        """The targets held by name (for the tab); see ``holds_everything`` for the overflow case."""
         return permits.held(permits.read_state(self.storage)) if self.storage else set()
 
-    def ask_again(self, targets) -> None:
-        """The tab's explicit action: the targets are released and asked for at the next start (§4.1)."""
-        self.update_state(lambda s: permits.ask_again(s, targets))
+    def holds_everything(self) -> bool:
+        return permits.holds_everything(permits.read_state(self.storage)) if self.storage else False
+
+    def ask_again(self, targets, done=None) -> bool:
+        """The tab's explicit action: the targets are released and asked for at the next start (§4.1). Returns at
+        once; ``done(recorded)`` follows from the state writer."""
+        targets = list(targets)
+        return self.state_writer.submit(lambda s: permits.ask_again(s, targets), done)
+
+    def ask_again_all(self, targets, done=None) -> bool:
+        targets = list(targets)
+        return self.state_writer.submit(lambda s: permits.ask_again_all(s, targets), done)
+
+    def flush(self, timeout: float) -> bool:
+        return self.state_writer.flush(timeout)
 
     def loaded(self) -> None:
-        """``on_load`` ran: this load's request was granted."""
+        """``on_load`` ran (on OrcaSlicer's load thread, not the UI thread): this load's request was granted."""
         self.update_state(lambda s: permits.complete_load(s, self.load_id))
 
     def update_state(self, change) -> dict:
+        """A synchronous state change, for import and ``on_load`` only -- never on the UI thread."""
         if self.storage is None:
             return {}
         return permits.update_state(self.storage, change)
@@ -317,6 +437,7 @@ class Runtime:
         out = {
             "previous_load": self.decision.get("previous_load"),
             "held": sorted(self.held()),
+            "held_all": self.holds_everything(),
             "generation": snapshot.generation if snapshot else 0,
             "blocked": snapshot.blocked if snapshot else None,
         }
@@ -325,8 +446,28 @@ class Runtime:
         return out
 
 
+def _blocked(current: Effective, state: dict, changed: list[str], requested) -> str | None:
+    if current.problems:
+        return "problem"
+    if current.connection is None:
+        return "missing"
+    target = f"network:{origin(current.server_url)}"
+    if target not in changed and permits.is_held(state, target):
+        return "held"
+    if target not in requested:
+        return "needs_restart"
+    return None
+
+
+def _step_name(results: dict, stage: str) -> str:
+    return stage if stage not in results else f"{stage}:{sum(k.startswith(stage) for k in results)}"
+
+
 def _run_step(fn, deadline: float) -> str:
-    """One shutdown step in a daemon thread, waited for at most ``deadline``: the UI thread never waits longer."""
+    """One shutdown step in a daemon thread, waited for at most ``deadline``: the UI thread never waits longer.
+
+    A step past its deadline is left running and reported as ``deadline``; the caller then cleans up nothing.
+    """
     outcome: dict[str, str] = {}
 
     def run():

@@ -99,21 +99,30 @@ def parse_base(raw) -> Settings:
     return Settings(**values, problems=tuple(problems))
 
 
-def effective(base: Settings, override, preset_name: str | None = None) -> Effective:
+def effective(base: Settings, override, preset_name: str | None = None, override_error: str | None = None) -> Effective:
     """Base with the allowed override fields on top (§4.4 ⟨R23-A1⟩).
 
-    ``override`` is what ``get_config()`` returns for a preset that has one, ``None`` otherwise. An override without
-    ``ca_pem`` keeps base's CA; ``ca_pem`` present and empty means the system's trust for that address.
+    ``override`` is the preset's override for our agent, ``None`` when the preset has none. ``override_error`` names
+    why it could not be read -- an unreadable envelope, an entry whose config is not an object; then there is no
+    connection, never base instead (H1 review R1). An override without ``ca_pem`` keeps base's CA; ``ca_pem`` present
+    and empty means the system's trust for that address.
+
+    A stored base value that does not validate refuses the connection whenever that field is the one in use: a CA or
+    proxy header the user meant to apply is never silently replaced by the system's trust or by nothing.
     """
+    if override_error is not None:
+        return Effective("preset", preset_name, None, None, None, problems=(f"override:{override_error}",))
     if override is None:
-        return _resolve("base", None, base.server_url, base.ca_pem, base, (), ())
+        return _resolve("base", None, base.server_url, base.ca_pem, base, (), _used_problems(base, CONNECTION_FIELDS))
     if not isinstance(override, dict):
         return Effective("preset", preset_name, None, None, None, problems=("override:not_an_object",))
     ignored = tuple(sorted(name for name in override if name not in OVERRIDE_FIELDS))
     server_url, ca_pem = base.server_url, base.ca_pem
+    used = {"api_key", "headers"}
     problems: list[str] = []
     for name in OVERRIDE_FIELDS:
         if name not in override:
+            used.add(name)
             continue
         try:
             value = _PARSERS[name](override[name])
@@ -121,18 +130,28 @@ def effective(base: Settings, override, preset_name: str | None = None) -> Effec
             problems.append(f"override:{name}:{exc.code}")
             continue
         if name == "server_url":
+            if value is None:
+                used.add(name)
             server_url = value if value is not None else base.server_url
         else:
             ca_pem = value
     if problems:
         return Effective("preset", preset_name, None, None, None, ignored=ignored, problems=tuple(problems))
-    return _resolve("preset", preset_name, server_url, ca_pem, base, ignored, ())
+    return _resolve("preset", preset_name, server_url, ca_pem, base, ignored, _used_problems(base, used))
+
+
+CONNECTION_FIELDS = frozenset({"server_url", "api_key", "ca_pem", "headers"})
+
+
+def _used_problems(base: Settings, fields) -> tuple[str, ...]:
+    """The base's problems that touch a field the connection uses (``base:`` ones always do)."""
+    return tuple(p for p in base.problems if p.split(":", 1)[0] in fields or p.startswith("base:"))
 
 
 def _resolve(source, preset_name, server_url, ca_pem, base: Settings, ignored, problems) -> Effective:
     missing = tuple(name for name, value in (("server_url", server_url), ("api_key", base.api_key)) if not value)
     connection = None
-    if not missing:
+    if not missing and not problems:
         connection = Connection(base_url=server_url, api_key=base.api_key, ca_pem=ca_pem, extra_headers=base.headers)
     return Effective(source, preset_name, server_url, ca_pem, connection, missing, ignored, problems)
 
@@ -152,7 +171,7 @@ def masked_view(base: Settings, current: Effective) -> dict:
         "read_only": list(OVERRIDE_FIELDS) if under_override else [],
         "ignored": [name for name in current.ignored if name in BASE_FIELDS],
         "missing": list(current.missing),
-        "problems": list(base.problems) + list(current.problems),
+        "problems": list(base.problems) + [p for p in current.problems if p not in base.problems],
     }
 
 
@@ -232,8 +251,8 @@ def slot_targets(base: Settings, current: Effective) -> dict[str, str]:
     """The permission target each user setting implies now, typed as ``<bucket>:<target>`` and free of secrets.
 
     A slot is one setting whose value can change: the base address, the effective address, the dashboard and the
-    export folder. ``permits.observe`` compares slot by slot, so A -> B -> A counts as a change only when B was
-    seen (§4.1 ⟨R23.1⟩). These are the targets an unfinished load may leave held (⟨R23-B2⟩); the plugin's fixed
+    export folder. A Runtime compares slot by slot with its own load's baseline, so A -> B -> A counts as a change
+    only when that Runtime saw B (§4.1 ⟨R23.1⟩). These are the targets an unfinished load may leave held (⟨R23-B2⟩); the plugin's fixed
     targets (threads, the temp model tree, the relay) are not among them.
     """
     slots = {}

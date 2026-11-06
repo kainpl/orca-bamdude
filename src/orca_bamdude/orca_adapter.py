@@ -141,29 +141,43 @@ _capabilities: dict = {}
 
 
 def _preset_override():
-    """The edited printer preset's override for our agent, and the preset's name; ``(None, None)`` without one."""
+    """The edited printer preset's override for our agent: ``(override, preset name, error)``.
+
+    Three states, never confused (H1 review R1): no override (``None`` with no error) -- base applies; an override
+    read; or an override that could not be read -- an unreadable or malformed envelope, a preset that cannot be read,
+    an entry of ours whose config is not an object. The last refuses the connection: falling back to base could send
+    the key to the global server when the preset meant another one. Called on the UI thread only (R3): the preset
+    bundle is OrcaSlicer's live object.
+    """
     try:
         preset = orca.host.preset_bundle().printers.get_edited_preset()
         raw = preset.config_value("printer_plugin_config_overrides")
-    except Exception:  # noqa: BLE001 -- no preset to read is no override
-        return None, None
+        name = getattr(preset, "name", None)
+    except Exception:  # noqa: BLE001 -- we cannot tell whether an override exists
+        return None, None, "unreadable"
+    if raw is None or raw == "":
+        return None, name, None
+    if not isinstance(raw, str):
+        return None, name, "unreadable"
     try:
-        entries = json.loads(raw) if raw else []
+        entries = json.loads(raw)
     except ValueError:
-        return None, None
-    for entry in entries if isinstance(entries, list) else []:
-        if (
-            isinstance(entry, dict)
-            and entry.get("capability") == AGENT_CAPABILITY
-            and entry.get("plugin_key") == INSTALL["plugin_key"]
-        ):
-            return _object(entry.get("cap_config")), getattr(preset, "name", None)
-    return None, None
+        return None, name, "unreadable"
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        return None, name, "unreadable"
+    for entry in entries:
+        if entry.get("capability") == AGENT_CAPABILITY and entry.get("plugin_key") == INSTALL["plugin_key"]:
+            config = _object(entry.get("cap_config"))
+            if not isinstance(config, dict):
+                return None, name, "not_an_object"
+            return config, name, None
+    return None, name, None
 
 
 def refresh_settings():
-    override, preset_name = _preset_override()
-    return RUNTIME.apply_settings(read_base(INSTALL) or {}, override, preset_name)
+    """Read base and the preset's override and freeze them. UI thread only (§4.3, H1 review R3)."""
+    override, preset_name, error = _preset_override()
+    return RUNTIME.apply_settings(read_base(INSTALL) or {}, override, preset_name, override_error=error)
 
 
 def _take_storage() -> None:
@@ -172,8 +186,7 @@ def _take_storage() -> None:
         storage = orca.host.plugin.storage()
     except Exception:  # noqa: BLE001 -- without storage the plugin keeps no state, it does not stop
         return
-    if RUNTIME.storage is None:
-        RUNTIME.storage = storage
+    RUNTIME.adopt_storage(storage)
 
 
 _CONFIG_UI = """<!doctype html><meta charset="utf-8"><body><p id="msg"></p><script>
@@ -207,11 +220,12 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
         return _CONFIG_UI
 
     def on_load(self):
+        # OrcaSlicer's load thread, not the UI thread: no preset is read here; the first UI entry takes the snapshot,
+        # and until then there is no connection (H1 review R3).
         _capabilities["agent"] = self
         RUNTIME.attach("agent")
         _take_storage()
         RUNTIME.loaded()
-        refresh_settings()
 
     def on_unload(self):
         _capabilities.pop("agent", None)
@@ -235,6 +249,8 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
         return ERR_NOT_SUPPORTED
 
     def start_discovery(self, start, sending):
+        if start:  # UI thread, after an agent switch: the first point a snapshot may be taken
+            refresh_settings()
         return True
 
     def bind_detect(self, dev_ip, sec_link, detect):
@@ -338,15 +354,31 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
             pass
 
     def on_message(self, data):
+        """UI thread: read, decide, queue -- never wait for the state file (H1 review R4). An explicit retry is
+        reported as recorded only once the state writer has written it."""
         op = data.get("op") if isinstance(data, dict) else None
         if op == "state":
             refresh_settings()
             self._post("state", **RUNTIME.view())
         elif op == "ask_again":
-            RUNTIME.ask_again(sorted(RUNTIME.held()))
-            self._post("state", **RUNTIME.view())
+            self._ask_again(saved=False)
         elif op == "save_settings":
             self._save_settings(data.get("edit"))
+
+    def _ask_again(self, saved: bool, targets=None) -> None:
+        def recorded(ok: bool) -> None:  # the state writer's thread; posting to the page is safe from any thread
+            self._post("state", **RUNTIME.view(), saved=saved, recorded=ok)
+
+        if targets is None:
+            snapshot = RUNTIME.snapshot
+            if RUNTIME.holds_everything() and snapshot is not None:
+                accepted = RUNTIME.ask_again_all(sorted(snapshot.slots.values()), done=recorded)
+            else:
+                accepted = RUNTIME.ask_again(sorted(RUNTIME.held()), done=recorded)
+        else:
+            accepted = RUNTIME.ask_again(targets, done=recorded)
+        if not accepted:
+            self._post("error", op="ask_again", code="stopping")
 
     def _save_settings(self, edit) -> None:
         agent = _capabilities.get("agent")
@@ -362,9 +394,8 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
         # Saving in the tab is an explicit action: the targets of the saved base are asked for at the next start
         # even if an unfinished load held them (§4.1 ⟨R23.1-A2⟩).
         base = parse_base(new)
-        RUNTIME.ask_again(sorted(user_targets(base, effective(base, None))))
         refresh_settings()
-        self._post("state", **RUNTIME.view(), saved=True)
+        self._ask_again(saved=True, targets=sorted(user_targets(base, effective(base, None))))
 
 
 @orca.plugin

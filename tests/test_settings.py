@@ -113,6 +113,39 @@ def test_a_broken_override_refuses_the_connection_instead_of_falling_back_to_bas
     assert eff.problems == ("override:server_url:url_scheme",)
 
 
+@pytest.mark.parametrize(
+    "field,value", [("ca_pem", "invalid PEM"), ("headers", [["Authorization", "x"]]), ("api_key", "has space")]
+)
+def test_a_broken_base_field_the_connection_uses_refuses_it(field, value):
+    # H1 review R1: a CA or header the user meant to apply is never replaced by the system's trust or by nothing.
+    eff = effective(parse_base(base_raw(**{field: value})), None)
+    assert eff.connection is None
+    assert any(p.startswith(f"{field}:") for p in eff.problems)
+
+
+def test_a_broken_base_ca_does_not_matter_when_the_override_sets_its_own():
+    base = parse_base(base_raw(ca_pem="invalid PEM"))
+    assert effective(base, {"server_url": "http://192.168.1.5:8000", "ca_pem": ""}).connection is not None
+    assert effective(base, {"server_url": "http://192.168.1.5:8000"}).connection is None
+
+
+def test_a_broken_export_folder_does_not_block_the_connection():
+    eff = effective(parse_base(base_raw(export_dir="relative")), None)
+    assert eff.connection is not None and eff.problems == ()
+
+
+def test_an_override_that_could_not_be_read_refuses_instead_of_falling_back():
+    eff = effective(parse_base(base_raw()), None, preset_name="X1", override_error="unreadable")
+    assert eff.source == "preset" and eff.connection is None
+    assert eff.problems == ("override:unreadable",)
+
+
+def test_the_masked_view_names_each_problem_once():
+    base = parse_base(base_raw(ca_pem="invalid PEM"))
+    view = masked_view(base, effective(base, None))
+    assert view["problems"] == ["ca_pem:ca_pem_invalid"]
+
+
 def test_an_override_that_is_not_an_object_is_a_problem():
     eff = effective(parse_base(base_raw()), "garbage")
     assert eff.connection is None

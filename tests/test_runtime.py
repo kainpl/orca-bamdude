@@ -4,6 +4,8 @@ snapshot and its generation, the permission targets it may use, and shutdown in 
 import threading
 import time
 
+from orca_bamdude import service
+from orca_bamdude.locking import FileLock
 from orca_bamdude.permits import read_state
 from orca_bamdude.service import Runtime
 
@@ -63,7 +65,8 @@ def test_after_the_fence_nothing_new_is_admitted(tmp_path):
     runtime.release(token)  # a release after the fence is harmless
 
 
-def test_a_shutdown_step_that_fails_or_overruns_does_not_stop_the_others(tmp_path):
+def test_a_step_that_fails_or_overruns_leaves_its_resources_alone(tmp_path):
+    # H1 review R2: cleanup only after the owners it cleans up after are known to have finished.
     runtime = make(tmp_path)
     ran = []
     runtime.on_shutdown("cancel", lambda: 1 / 0)
@@ -72,10 +75,43 @@ def test_a_shutdown_step_that_fails_or_overruns_does_not_stop_the_others(tmp_pat
     started = time.monotonic()
     report = runtime.shutdown("unload")
     assert time.monotonic() - started < 2
-    assert ran == ["cleanup"]
+    assert ran == []
     assert report["steps"]["cancel"] == "ZeroDivisionError"
     assert report["steps"]["stop"] == "deadline"
-    assert report["steps"]["cleanup"] == "ok"
+    assert report["steps"]["cleanup"] == "skipped"
+    assert report["unfinished"] == ["stop"]
+
+
+def test_cleanup_waits_for_the_owner_to_actually_finish(tmp_path):
+    runtime = make(tmp_path)
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    owned = tmp_path / "staging-owned.txt"
+    owned.write_text("owned", encoding="utf-8")
+
+    def stop():
+        entered.set()
+        release.wait(3)
+        finished.set()
+
+    runtime.on_shutdown("stop", stop, deadline=0.03)
+    runtime.on_shutdown("cleanup", owned.unlink)
+    try:
+        report = runtime.shutdown("unload")
+        assert entered.is_set() and not finished.is_set()
+        assert report["steps"]["stop"] == "deadline"
+        assert owned.exists()
+    finally:
+        release.set()
+        finished.wait(2)
+
+
+def test_cleanup_is_skipped_while_an_admitted_operation_has_not_finished(tmp_path):
+    runtime = make(tmp_path)
+    ran = []
+    runtime.admit("upload")  # never released: its owner is still running
+    runtime.on_shutdown("cleanup", lambda: ran.append("cleanup"))
+    report = runtime.shutdown("unload")
+    assert ran == [] and report["steps"]["cleanup"] == "skipped"
 
 
 def test_shutdown_never_waits_for_the_notifier_held_by_the_host(tmp_path):
@@ -132,9 +168,12 @@ def test_asking_again_from_the_tab_queues_the_held_target_for_the_next_start(tmp
     runtime = make(tmp_path, requested=set(), decision=decision)
     runtime.update_state(lambda s: {**s, "held_targets": [A]})
     runtime.apply_settings(BASE, None, None)
-    runtime.ask_again([A])
+    done = []
+    runtime.ask_again([A], done=done.append)
+    assert runtime.flush(5)
     state = read_state(str(tmp_path))
     assert A not in state.get("held_targets", []) and A in state["pending_targets"]
+    assert done == [True]
 
 
 def test_on_load_completes_this_loads_marker(tmp_path):
@@ -144,8 +183,110 @@ def test_on_load_completes_this_loads_marker(tmp_path):
     assert read_state(str(tmp_path))["load_marker"]["completed"] is True
 
 
-def test_a_snapshot_records_what_the_runtime_saw(tmp_path):
+def test_what_a_runtime_sees_first_is_queued_but_keeps_no_shared_baseline(tmp_path):
     runtime = make(tmp_path, requested={A, B})
     runtime.apply_settings(BASE, {"server_url": "http://192.168.1.5:8000"}, "X1 LAN")
-    seen = read_state(str(tmp_path))["last_seen"]
-    assert seen["base_network"] == A and seen["effective_network"] == B
+    assert runtime.flush(5)
+    state = read_state(str(tmp_path))
+    assert A in state["pending_targets"] and B in state["pending_targets"]
+    assert "last_seen" not in state
+
+
+def test_a_change_this_runtime_saw_releases_the_hold_even_back_to_the_old_value(tmp_path):
+    runtime = make(tmp_path, requested=set())
+    runtime.update_state(lambda s: {**s, "held_targets": [A]})
+    runtime.apply_settings(BASE, None, None)  # first sighting of A: still held
+    assert runtime.flush(5) and A in runtime.held()
+    runtime.apply_settings({**BASE, "server_url": "http://192.168.1.5:8000"}, None, None)
+    runtime.apply_settings(BASE, None, None)  # B was seen in between: A is a change now
+    assert runtime.flush(5)
+    assert A not in runtime.held()
+
+
+def test_another_runtime_seeing_another_preset_does_not_release_this_loads_hold(tmp_path):
+    old = make(tmp_path, requested={A, "network:https://other.example"})
+    other = make(tmp_path, requested={A, "network:https://other.example"})
+    old.apply_settings(BASE, None, None)
+    old.update_state(lambda s: {**s, "held_targets": [A]})
+    other.apply_settings(BASE, {"server_url": "https://other.example"}, "other")
+    old.apply_settings(BASE, None, None)  # old never saw anything but A
+    assert old.flush(5) and other.flush(5)
+    assert A in old.held()
+
+
+# -- ordering, the fence and the UI thread (H1 review R3, R4) ---------------------------------------------------
+
+
+def _slow_effective(monkeypatch, marker, entered, release):
+    original = service.effective
+
+    def slow(base, override, preset_name=None, override_error=None):
+        result = original(base, override, preset_name, override_error)
+        if (result.server_url or "").endswith(marker):
+            entered.set()
+            assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(service, "effective", slow)
+
+
+def test_an_older_settings_read_never_publishes_over_a_newer_one(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A})
+    entered, release = threading.Event(), threading.Event()
+    _slow_effective(monkeypatch, "/old", entered, release)
+    old = {**BASE, "server_url": BASE["server_url"] + "/old"}
+    worker = threading.Thread(target=lambda: runtime.apply_settings(old, None, None))
+    worker.start()
+    assert entered.wait(5)
+    newer = runtime.apply_settings({**BASE, "server_url": BASE["server_url"] + "/new"}, None, None)
+    release.set()
+    worker.join(5)
+    assert runtime.snapshot is newer
+
+
+def test_settings_cannot_publish_after_shutdown(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A})
+    entered, release = threading.Event(), threading.Event()
+    _slow_effective(monkeypatch, "farm.example", entered, release)
+    worker = threading.Thread(target=lambda: runtime.apply_settings(BASE, None, None))
+    worker.start()
+    assert entered.wait(5)
+    runtime.shutdown("unload")
+    release.set()
+    worker.join(5)
+    assert runtime.snapshot is None
+    assert runtime.apply_settings(BASE, None, None) is None
+
+
+def test_settings_and_requests_never_wait_for_the_state_file_lock(tmp_path):
+    runtime = make(tmp_path, requested={A})
+    held_lock, release = threading.Event(), threading.Event()
+
+    def hold():
+        with FileLock(str(tmp_path / "state.lock"), 5):
+            held_lock.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held_lock.wait(5)
+    try:
+        started = time.monotonic()
+        runtime.apply_settings(BASE, None, None)
+        done = []
+        runtime.ask_again([A], done=done.append)
+        assert time.monotonic() - started < 0.3
+        assert done == []  # not recorded yet: never shown as saved before it is
+    finally:
+        release.set()
+        holder.join(5)
+    assert runtime.flush(5) and done == [True]
+    assert A in read_state(str(tmp_path))["pending_targets"]
+
+
+def test_shutdown_drains_the_state_writes_it_already_accepted(tmp_path):
+    runtime = make(tmp_path, requested={A})
+    runtime.ask_again([B])
+    runtime.shutdown("unload")
+    assert B in read_state(str(tmp_path))["pending_targets"]
+    assert runtime.ask_again([A]) is False  # nothing new after the fence

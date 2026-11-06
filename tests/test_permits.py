@@ -4,13 +4,17 @@ import json
 import threading
 
 from orca_bamdude.permits import (
+    MAX_HELD,
     MAX_PENDING,
     ask_again,
+    ask_again_all,
     begin_load,
     complete_load,
     held,
-    observe,
+    holds_everything,
+    is_held,
     read_state,
+    record_observation,
     update_state,
 )
 
@@ -59,8 +63,6 @@ def test_a_held_target_stays_held_across_completed_loads_and_restarts():
     state, _, _ = started({}, "L1", {A})
     state, _, _ = started(state, "L2", {A})  # L1 unfinished -> A held
     state = complete_load(state, "L2")
-    state, changed = observe(state, {"base_network": A})  # nothing changed since the refusal
-    assert changed == []
     for load_id in ("L3", "L4"):
         state, requested, _ = started(state, load_id, {A})
         state = complete_load(state, load_id)
@@ -75,28 +77,48 @@ def test_two_aborted_loads_in_a_row_keep_the_earlier_hold():
     assert decision["previous_load"] == "unfinished"
 
 
-def test_a_change_the_runtime_saw_releases_a_held_value_even_back_to_the_old_one():
-    state = {"last_seen": {"base_network": A}, "held_targets": [A]}
-    state, changed = observe(state, {"base_network": B})
-    assert changed == [B] and held(state) == {A}
-    state, changed = observe(state, {"base_network": A})
-    assert changed == [A] and held(state) == set()
+def test_a_change_a_runtime_saw_releases_the_new_value_and_queues_it():
+    # Which values changed is decided by the Runtime that saw them (H1 review R5); the state only records it.
+    state = record_observation({"held_targets": [A]}, changed=[A], first=[])
+    assert held(state) == set() and state["pending_targets"] == [A]
     _, requested, _ = started(state, "L9", {A})
     assert A in requested
 
 
-def test_a_first_sighting_is_remembered_and_queued_unless_held():
-    state, changed = observe({"held_targets": [A]}, {"base_network": A, "dashboard": DASH_A})
-    assert changed == []
+def test_a_first_sighting_is_queued_unless_held_and_never_releases_a_hold():
+    state = record_observation({"held_targets": [A]}, changed=[], first=[A, DASH_A])
     assert held(state) == {A}
     assert state["pending_targets"] == [DASH_A]
-    assert state["last_seen"] == {"base_network": A, "dashboard": DASH_A}
 
 
-def test_an_unchanged_value_does_not_come_back_by_itself():
-    state = {"last_seen": {"base_network": A}, "held_targets": [A]}
-    state, changed = observe(state, {"base_network": A})
-    assert changed == [] and held(state) == {A}
+def test_the_state_keeps_no_shared_baseline_of_what_was_seen():
+    state = record_observation({}, changed=[B], first=[A])
+    assert "last_seen" not in state
+
+
+def test_a_full_hold_list_holds_everything_instead_of_forgetting_the_oldest():
+    # H1 review R5: a memory bound must never turn into an automatic retry of an old refusal.
+    holds = [A] + [f"network:https://h{i}.example" for i in range(MAX_HELD - 1)]
+    state = {
+        "held_targets": holds,
+        "load_marker": {"id": "x", "targets": ["network:https://new.example"], "completed": False},
+    }
+    state, requested, _ = started(state, "next", {A, "network:https://new.example", B})
+    assert holds_everything(state)
+    assert is_held(state, A) and is_held(state, B) and requested == set()
+    assert len(state["held_targets"]) <= MAX_HELD
+
+
+def test_under_hold_everything_only_an_explicit_target_comes_back():
+    state = {"held_all": True, "held_targets": [A]}
+    state = ask_again(state, [B])
+    assert not is_held(state, B) and is_held(state, A)
+    _, requested, _ = started(state, "L1", {A, B})
+    assert requested == {B}
+    state = ask_again_all(state, [A])
+    assert not holds_everything(state) and held(state) == set()
+    _, requested, _ = started(state, "L2", {A, B})
+    assert requested == {A, B}
 
 
 def test_asking_again_releases_and_queues_the_target():

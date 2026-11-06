@@ -10,8 +10,9 @@ refused again on every start. So:
   prompt, and OrcaSlicer's install state is off limits), so the state it reports is neutral.
 - **Holding** (⟨R23-B2⟩). The targets of an unfinished load become held, the base address included. A held target is
   not asked for, and no client is made for it, until the user asks again from the tab (``ask_again``) or a setting
-  the runtime watches changes to it (``observe``). Holds accumulate: completed loads, restarts and a later grant from
-  another load do not release them (⟨R23.1⟩).
+  a Runtime watches changes to it during its own load (``record_observation``; the baseline is that Runtime's, not
+  this shared file's). Holds accumulate: completed loads, restarts and a later grant from another load do not
+  release them (⟨R23.1⟩). More holds than ``MAX_HELD`` hold everything rather than forget the oldest.
 - **Pending.** The last few targets seen or asked for again, so a preset switch within a session finds its origin
   already granted.
 
@@ -50,13 +51,36 @@ def _with_pending(state: dict, targets) -> dict:
 
 
 def held(state: dict) -> set[str]:
+    """The targets held by name. Under ``holds_everything`` every target is held except the ones released since."""
     return set(_targets(state.get("held_targets")))
 
 
+def holds_everything(state: dict) -> bool:
+    return state.get("held_all") is True
+
+
+def is_held(state: dict, target: str) -> bool:
+    if holds_everything(state):
+        return target not in _targets(state.get("released"))
+    return target in held(state)
+
+
 def _with_held(state: dict, targets: set[str]) -> dict:
+    """Hold exactly ``targets``. More than ``MAX_HELD`` never drops the oldest -- that would ask for an old refusal
+    again by itself (H1 review R5); it holds everything instead, until the tab releases targets explicitly."""
     kept = [t for t in _targets(state.get("held_targets")) if t in targets]
     kept += sorted(targets - set(kept))
-    return {**state, "held_targets": kept[-MAX_HELD:]}
+    if len(kept) > MAX_HELD:
+        return {**state, "held_targets": kept[:MAX_HELD], "held_all": True, "released": []}
+    return {**state, "held_targets": kept}
+
+
+def _released(state: dict, targets) -> dict:
+    """Under ``holds_everything``: these targets come back; the rest stays held."""
+    if not holds_everything(state):
+        return state
+    released = [t for t in _targets(state.get("released")) if t not in targets] + list(targets)
+    return {**state, "released": released[-MAX_PENDING:]}
 
 
 def begin_load(state: dict, load_id: str, current: set[str]) -> tuple[dict, set[str], dict]:
@@ -72,9 +96,11 @@ def begin_load(state: dict, load_id: str, current: set[str]) -> tuple[dict, set[
         previous = "completed" if marker.get("completed") is True else "unfinished"
         if previous == "unfinished":
             held_now = sorted(set(_targets(marker.get("targets"))))
+            if holds_everything(state):
+                state = {**state, "released": [t for t in _targets(state.get("released")) if t not in held_now]}
             state = _with_held(state, held(state) | set(held_now))
-    holds = held(state)
-    requested = (set(current) | set(_targets(state.get("pending_targets")))) - holds
+    wanted = set(current) | set(_targets(state.get("pending_targets")))
+    requested = {t for t in wanted if not is_held(state, t)}
     state = {**state, "load_marker": {"id": load_id, "targets": sorted(requested), "completed": False}}
     return state, requested, {"previous_load": previous, "held_now": held_now}
 
@@ -87,37 +113,32 @@ def complete_load(state: dict, load_id: str) -> dict:
     return {**state, "load_marker": {**marker, "completed": True}}
 
 
-def observe(state: dict, slots: dict[str, str]) -> tuple[dict, list[str]]:
-    """The runtime saw these settings. A slot whose target changed since it was last seen releases that target from
-    any hold and queues it; an unchanged one does nothing. Returns the new state and the targets that changed.
+def record_observation(state: dict, changed, first) -> dict:
+    """What one Runtime saw (H1 review R5): ``changed`` are targets of settings it saw change during its own load --
+    released from any hold and queued; ``first`` are its first sightings -- queued unless held, never released.
 
-    A slot seen for the first time is only remembered (and queued unless held): a first sighting is not a change. The
-    first load ever can be the refused one, so its address is held before the runtime has seen anything -- counting
-    that first sighting as a change would ask for the refused address again on every start.
+    The baseline of what was seen lives in that Runtime's memory, not in this shared file: another process seeing
+    another preset is not this load's change. A first sighting is not a change, so the first load ever -- possibly
+    the refused one -- never asks for its refused address again by itself.
     """
-    last = state.get("last_seen")
-    last = dict(last) if isinstance(last, dict) else {}
-    holds = held(state)
-    changed, first = [], []
-    for slot, target in sorted(slots.items()):
-        if slot not in last:
-            first.append(target)
-        elif last[slot] != target:
-            changed.append(target)
-        last[slot] = target
-    state = {**state, "last_seen": last}
-    if changed:
-        state = _with_held(state, holds - set(changed))
-    queued = changed + [t for t in first if t not in holds]
-    if queued:
-        state = _with_pending(state, queued)
-    return state, changed
+    changed = [t for t in changed if isinstance(t, str)]
+    state = _released(state, changed)
+    state = _with_held(state, held(state) - set(changed)) if changed else state
+    queued = changed + [t for t in first if isinstance(t, str) and not is_held(state, t)]
+    return _with_pending(state, queued) if queued else state
 
 
 def ask_again(state: dict, targets) -> dict:
     """An explicit action in the tab: release these targets and queue them for the next load."""
     targets = [t for t in targets if isinstance(t, str)]
+    state = _released(state, targets)
     return _with_pending(_with_held(state, held(state) - set(targets)), targets)
+
+
+def ask_again_all(state: dict, current) -> dict:
+    """The tab's "ask again for everything": no hold is left; the current targets are asked for at the next start."""
+    state = {**state, "held_targets": [], "held_all": False, "released": []}
+    return _with_pending(state, [t for t in current if isinstance(t, str)])
 
 
 def read_state(folder: str) -> dict:
