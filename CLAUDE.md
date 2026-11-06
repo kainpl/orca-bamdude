@@ -59,7 +59,9 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   OrcaSlicer checks, the `Notifier` — the only caller of the blocking `push_notification`, never waited for at
   shutdown — and the `StateWriter`, the one thread that writes `state.json`, closed in the same step as admission.
   Shutdown cleans up only after every owner is known to have finished; the UI thread never waits for the state
-  file's lock.
+  file's lock. A held target gets a connection only once the state file no longer holds it: a release is judged by
+  the writer under the lock and the snapshot is decided again after the write; a state file that cannot be read is
+  no connection.
 - `orca_adapter.py` — the only module that imports `orca`: install facts, the one permission request, the
   `BamDudePrinter` agent and the `BamDude` tab. `__init__.py` imports it only where `orca` exists. The live preset
   bundle is read on the UI thread only (`on_load` runs on OrcaSlicer's load thread); an override that cannot be
