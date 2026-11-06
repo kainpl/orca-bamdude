@@ -96,9 +96,20 @@ class _Viewer:
 
 
 class CameraRelay:
-    def __init__(self, opener: Callable[[Target], Upstream], on_event: Callable[[RelayEvent], None] | None = None):
+    """``admits(target)``, when given, is asked at every request, every upstream open and every renewal: a target its
+    owner no longer admits (stale, disconnected, another binding, the right lost, the fence) is not found and opens
+    nothing, and a lease that ends under it is not renewed (H2 review R1). Admission is the owner's; the relay never
+    keeps one of its own."""
+
+    def __init__(
+        self,
+        opener: Callable[[Target], Upstream],
+        on_event: Callable[[RelayEvent], None] | None = None,
+        admits: Callable[[Target], bool] | None = None,
+    ):
         self._opener = opener
         self._on_event = on_event
+        self._admits = admits
         self._lock = threading.Lock()
         self._secret = secrets.token_urlsafe(32)
         self._target: Target | None = None
@@ -172,6 +183,19 @@ class CameraRelay:
         if viewer is not None:
             viewer.release()
 
+    @property
+    def target(self) -> Target | None:
+        with self._lock:
+            return self._target
+
+    def _admitted(self, target: Target) -> bool:
+        if self._admits is None:
+            return True
+        try:
+            return bool(self._admits(target))
+        except Exception:  # noqa: BLE001 -- an admission that cannot be decided admits nothing
+            return False
+
     def url_for(self, target: Target) -> str | None:
         """The player's address for ``target``, or ``None`` while it is not the chosen printer or nothing listens."""
         with self._lock:
@@ -227,6 +251,8 @@ class CameraRelay:
             return None
         if segments[2] != target.identity:
             return None
+        if not self._admitted(target):
+            return None
         return target
 
     def _claim(self, target: Target, sock: socket.socket) -> _Viewer | None:
@@ -268,6 +294,8 @@ class CameraRelay:
 
     def _open(self, viewer: _Viewer) -> Upstream | str:
         """Open ``viewer``'s upstream, or return the code of why it could not be opened."""
+        if not self._admitted(viewer.target):
+            return "not_admitted"
         try:
             upstream = self._opener(viewer.target)
         except (HttpError, TransportError) as exc:

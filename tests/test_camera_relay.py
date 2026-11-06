@@ -393,3 +393,73 @@ def test_the_secret_never_reaches_a_log(relays, capsys):
 
     captured = capsys.readouterr()
     assert url.split("/")[3] not in captured.err + captured.out
+
+
+# -- admission: asked at the request, at every open and at every renewal (H2 review R1) --------------------------
+
+
+@pytest.fixture
+def admitted_relays():
+    started = []
+
+    def make(opener, admits):
+        events = []
+        relay = CameraRelay(opener, on_event=events.append, admits=admits)
+        relay.start()
+        started.append(relay)
+        return relay, events
+
+    yield make
+    for relay in started:
+        relay.stop()
+
+
+def test_a_target_no_longer_admitted_is_not_found_and_opens_nothing(admitted_relays):
+    allowed = {"now": True}
+    opener = Opener(FakeUpstream())
+    relay, _ = admitted_relays(opener, lambda target: allowed["now"])
+    relay.set_target(PRINTER)
+    url = relay.url_for(PRINTER)
+    allowed["now"] = False  # stale, disconnected, another binding, the right lost, the fence
+    conn, response = _get(url)
+    try:
+        assert response.status == 404
+    finally:
+        _leave(conn, response)
+    assert opener.targets == []
+
+
+def test_a_renewal_asks_for_admission_again(admitted_relays):
+    allowed = {"now": True}
+    opener = Opener(FakeUpstream([FRAME], hold=False), FakeUpstream([FRAME + b"second"]))
+    relay, events = admitted_relays(opener, lambda target: allowed["now"])
+    relay.set_target(PRINTER)
+    conn, response = _get(relay.url_for(PRINTER))
+    try:
+        assert response.read(len(FRAME)) == FRAME
+        allowed["now"] = False  # lost while the first lease played
+        assert response.read() == b""  # the lease ended and was not renewed
+    finally:
+        conn.close()
+    assert opener.targets == [PRINTER]
+    assert [e.code for e in events if e.kind == "unavailable"] == ["not_admitted"]
+
+
+def test_an_admitted_renewal_still_works(admitted_relays):
+    opener = Opener(FakeUpstream([FRAME], hold=False), FakeUpstream([FRAME + b"second"]))
+    relay, _ = admitted_relays(opener, lambda target: True)
+    relay.set_target(PRINTER)
+    conn, response = _get(relay.url_for(PRINTER))
+    try:
+        assert response.read(len(FRAME)) == FRAME
+        assert response.read(len(FRAME) + 6) == FRAME + b"second"
+    finally:
+        conn.close()
+    assert opener.targets == [PRINTER, PRINTER]
+
+
+def test_the_current_target_is_readable(relays):
+    relay, _ = relays(Opener())
+    assert relay.target is None
+    relay.set_target(PRINTER)
+    assert relay.target == PRINTER
