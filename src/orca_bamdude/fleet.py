@@ -43,6 +43,7 @@ relay, the reads' threads and the loop, within one deadline.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -69,21 +70,37 @@ _BLOCKED_MESSAGE = {"held": "connect.restart", "needs_restart": "connect.restart
 
 class HostCallbacks:
     """What OrcaSlicer handed the agent through ``set_on_*_fn``: set on the UI thread, cleared with ``None`` at the
-    host's shutdown, called from any thread."""
+    host's shutdown, called from any thread.
+
+    ``call`` holds this object's lock from the last admission check to the end of the host call, so what is handed over
+    is exactly what was admitted at that moment (H2 fix review F3). Every function the plugin is handed re-posts and
+    returns at once -- ``local_connect`` / ``local_message`` / ``printer_connected`` through ``CallAfter``
+    (``GUI_App::init_networking_callbacks``), the SSDP one through ``queue_on_main`` (``NetworkAgent::
+    apply_discovery_callback`` wraps it; the synchronous ``on_machine_alive`` runs later, from the UI queue) -- so the
+    lock is held only briefly. It is re-entrant: a host call may come back into the agent on the same thread."""
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._fns: dict[str, Callable | None] = {}
 
     def set(self, name: str, fn) -> None:
         with self._lock:
             self._fns[name] = fn
 
-    def call(self, name: str, *args) -> bool:
+    def call(self, name: str, *args, admit=None) -> bool:
+        """Hand ``args`` to the host's ``name``; with ``admit`` (a context manager yielding a bool) only if it still
+        admits them, checked under this lock."""
         with self._lock:
             fn = self._fns.get(name)
-        if fn is None:
-            return False
+            if fn is None:
+                return False
+            if admit is None:
+                return self._invoke(fn, args)
+            with admit() as admitted:
+                return self._invoke(fn, args) if admitted else False
+
+    @staticmethod
+    def _invoke(fn, args) -> bool:
         try:
             fn(*args)
         except Exception:  # noqa: BLE001 -- the host's wrapper failing never stops the fleet
@@ -147,9 +164,12 @@ class Fleet:
         self.relay = relay
         self._client_factory = client_factory
         self._lock = threading.Lock()
-        self._publication = threading.RLock()  # held from a stamp's check to its hand-over; rebind takes it too
+        # Held by every change that can void a stamp and by each hand-over from its check to its end; never while a
+        # host function is called by a change (they hand over afterwards). Order: callbacks -> publication -> _lock.
+        self._publication = threading.RLock()
         self._generation = 0
         self._era = 0
+        self._binding: Binding | None = None  # the namespace accepted in this generation (H2 fix review F2)
         self._snapshot = None
         self._client: ConnectorClient | None = None
         self._capabilities: Capabilities | None = None
@@ -185,6 +205,7 @@ class Fleet:
                     return
                 self._generation, self._snapshot = snapshot.generation, snapshot
                 self._era += 1
+                self._binding = None
                 old, self._client = self._client, self._client_factory(snapshot)
                 self._capabilities, self._map = None, None
                 self._status, self._status_at, self._firmware = None, None, None
@@ -199,12 +220,26 @@ class Fleet:
                 self.poller.configure(generation=snapshot.generation, poll_min_seconds=0)
                 stamp = self._stamp_locked()
             _close(old)  # the older generation's reads end now; their answers would be dropped anyway
-            if self.relay is not None:
-                self.relay.rotate()
-                self.relay.set_target(None)
-            if refused is not None:
-                self._emit("local_connect", stamp, FAILED, *refused)
+            self._revoke_camera_address()
+        if refused is not None:
+            self._emit("local_connect", stamp, FAILED, *refused)
         self._update_wants()
+
+    def _revoke_camera_address(self) -> None:
+        """A new generation or a proven new namespace: the relay's secret goes, so no address issued before opens
+        anything again, even for a printer that kept its number and identity (H2 fix review F2)."""
+        if self.relay is not None:
+            self.relay.rotate()
+            self.relay.set_target(None)
+
+    def _namespace_changed_locked(self, binding: Binding) -> bool:
+        """Under the lock: ``binding`` is what a read accepted; a different one than this generation's proves the
+        namespace changed under the same settings -- a new era, every older read void."""
+        changed = self._binding is not None and binding != self._binding
+        self._binding = binding
+        if changed:
+            self._era += 1
+        return changed
 
     def _blocked_message(self) -> str:
         return self.say(_BLOCKED_MESSAGE.get(getattr(self._snapshot, "blocked", None), "connect.setup"))
@@ -233,14 +268,22 @@ class Fleet:
                 return False
         return stamp.devices is None or stamp.devices is self._map
 
+    def _still(self, stamp: _Stamp) -> bool:
+        with self._lock:
+            return self._holds_locked(stamp) and not self.context.closed
+
+    @contextlib.contextmanager
+    def _admission(self, stamp: _Stamp):
+        """The hand-over's own check, made under the callbacks' lock and the publication lock and held to the end of
+        the host call: no change that voids the stamp can come between the check and the call (F3)."""
+        with self._publication:
+            yield self._still(stamp)
+
     def _emit(self, name: str, stamp: _Stamp, *args) -> bool:
         """Hand one message to the host if what it was computed under still holds. ``False`` when it was dropped."""
-        with self._publication:
-            with self._lock:
-                holds = self._holds_locked(stamp)
-            if not holds or self.context.closed:
-                return False
-            return self.callbacks.call(name, *args)
+        if not self._still(stamp):
+            return False  # early: no lock is waited for on behalf of a message already void
+        return self.callbacks.call(name, *args, admit=lambda: self._admission(stamp))
 
     # -- what OrcaSlicer asks ------------------------------------------------------------------------------------------
 
@@ -264,7 +307,7 @@ class Fleet:
         hold is refused with a sentence OrcaSlicer shows as it is -- never ``"5"`` (Orca takes it for a wrong access
         code and erases it) or ``"-1"`` (it adds hints about the Bambu network plugin)."""
         refused, wake = None, None
-        with self._lock:
+        with self._publication, self._lock:
             self._access_code = access_code or ""
             self._waiting, self._target, self._connected = None, None, False
             self._status, self._status_at, self._reread_asked = None, None, False
@@ -289,7 +332,7 @@ class Fleet:
         return OK
 
     def disconnect(self) -> int:
-        with self._lock:
+        with self._publication, self._lock:
             self._waiting, self._target, self._connected = None, None, False
             self._status, self._status_at = None, None
             self._camera = None
@@ -465,32 +508,36 @@ class Fleet:
     def _deliver_printers(self, value) -> None:
         read, capabilities, printers = value
         refused = None
-        with self._lock:
-            if not self._current(read):
-                return  # an answer about a connection, or a namespace, that is no longer this one
-            binding = Binding.of(read.base_url, capabilities)
-            self._learn(capabilities)
-            self._map = device_map(binding, printers)
-            self._list_once = False
-            announce = self._map.announced()
-            if self._waiting is not None:
-                waiting, self._waiting = self._waiting, None
-                self._target = self._map.get(waiting)
-                if self._target is None:
-                    refused = (waiting, self.say("connect.foreign"))
-            elif self._target is not None:
-                found = self._map.get(self._target.dev_id)
-                if found is None:
-                    # The connected device is gone: deleted, out of the key's scope, or of an earlier binding.
-                    if not self._connected:
-                        refused = (self._target.dev_id, self.say("connect.foreign"))
-                    self._target, self._connected, self._status, self._status_at = None, False, None, None
-                    self._camera = None
-                elif found != self._target:
-                    self._target = found  # the same printer under the number the server gives it now
-            wake = self._target is not None and not self._connected
-            stamp = self._stamp_locked()
-            announce_stamp = self._stamp_locked(devices=self._map)
+        with self._publication:
+            with self._lock:
+                if not self._current(read):
+                    return  # an answer about a connection, or a namespace, that is no longer this one
+                binding = Binding.of(read.base_url, capabilities)
+                renamed = self._namespace_changed_locked(binding)  # a restore seen by the list first (F2)
+                self._learn(capabilities)
+                self._map = device_map(binding, printers)
+                self._list_once = False
+                announce = self._map.announced()
+                if self._waiting is not None:
+                    waiting, self._waiting = self._waiting, None
+                    self._target = self._map.get(waiting)
+                    if self._target is None:
+                        refused = (waiting, self.say("connect.foreign"))
+                elif self._target is not None:
+                    found = self._map.get(self._target.dev_id)
+                    if found is None:
+                        # The connected device is gone: deleted, out of the key's scope, or of an earlier binding.
+                        if not self._connected:
+                            refused = (self._target.dev_id, self.say("connect.foreign"))
+                        self._target, self._connected, self._status, self._status_at = None, False, None, None
+                        self._camera = None
+                    elif found != self._target:
+                        self._target = found  # the same printer under the number the server gives it now
+                wake = self._target is not None and not self._connected
+                stamp = self._stamp_locked()
+                announce_stamp = self._stamp_locked(devices=self._map)
+            if renamed:
+                self._revoke_camera_address()
         for device in announce:
             self._emit("ssdp", announce_stamp, dialect.ssdp(device, binding))
         if refused is not None:
@@ -513,39 +560,52 @@ class Fleet:
         read, capabilities, statuses = value
         device = read.device
         reread, sequence = False, None
-        with self._lock:
-            if not self._current(read) or device is not self._target:
-                return
-            status = statuses.get(device.printer_id) if isinstance(statuses, dict) else None
-            named = status.get("connector_identity") if isinstance(status, dict) else None
-            if dev_id(Binding.of(read.base_url, capabilities), device.identity) != device.dev_id:
-                # A restore, another key or another address: the device belongs to the previous binding, and so does
-                # every read still in flight -- a new era (R2).
-                self._target, self._connected, self._status, self._status_at, self._map = None, False, None, None, None
-                self._camera = None
-                self._era += 1
-                self._list_once, reread = True, True
-            elif isinstance(status, dict) and named != device.identity:
-                # The number now names another printer: proven, so the device is revoked at once -- no report, job or
-                # camera on the strength of an older status (R4) -- and the list says what became of it.
-                self._status, self._status_at, self._camera = None, None, None
-                if not self._reread_asked:
-                    self._reread_asked, self._list_once, reread = True, True, True
-            elif not isinstance(status, dict):
-                # Missing (deleted, out of the key's scope): no proof either way; it ages, and the list is read once.
-                if not self._reread_asked:
-                    self._reread_asked, self._list_once, reread = True, True, True
-            else:
-                self._learn(capabilities)
-                self._status, self._status_at, self._reread_asked = status, self.clock(), False
-                firmware = status.get("firmware_version")
-                self._firmware = firmware if isinstance(firmware, str) else None
-                if not self._connected:
-                    self._connected, self._last_push = True, self.clock()
-                    self._seq += 1
-                    report = dialect.push_status(status, seq=self._seq)
-                    stamp = self._stamp_locked(device, connected=True)
-                    sequence = (stamp, device.dev_id, dialect.version_reply(self._firmware), report)
+        renamed = False
+        with self._publication:
+            with self._lock:
+                if not self._current(read) or device is not self._target:
+                    return
+                status = statuses.get(device.printer_id) if isinstance(statuses, dict) else None
+                named = status.get("connector_identity") if isinstance(status, dict) else None
+                binding = Binding.of(read.base_url, capabilities)
+                if dev_id(binding, device.identity) != device.dev_id:
+                    # A restore, another key or another address: the device belongs to the previous binding, and so does
+                    # every read still in flight -- a new era (R2) -- and every camera address issued under it (F2).
+                    self._target, self._connected, self._status, self._status_at, self._map = (
+                        None,
+                        False,
+                        None,
+                        None,
+                        None,
+                    )
+                    self._camera = None
+                    self._binding = binding
+                    self._era += 1
+                    self._list_once, reread, renamed = True, True, True
+                elif isinstance(status, dict) and named != device.identity:
+                    # The number now names another printer: proven, so the device is revoked at once -- no report, job or
+                    # camera on the strength of an older status (R4) -- and the list says what became of it.
+                    self._status, self._status_at, self._camera = None, None, None
+                    if not self._reread_asked:
+                        self._reread_asked, self._list_once, reread = True, True, True
+                elif not isinstance(status, dict):
+                    # Missing (deleted, out of the key's scope): no proof either way; it ages, and the list is read once.
+                    if not self._reread_asked:
+                        self._reread_asked, self._list_once, reread = True, True, True
+                else:
+                    self._learn(capabilities)
+                    self._binding = binding
+                    self._status, self._status_at, self._reread_asked = status, self.clock(), False
+                    firmware = status.get("firmware_version")
+                    self._firmware = firmware if isinstance(firmware, str) else None
+                    if not self._connected:
+                        self._connected, self._last_push = True, self.clock()
+                        self._seq += 1
+                        report = dialect.push_status(status, seq=self._seq)
+                        stamp = self._stamp_locked(device, connected=True)
+                        sequence = (stamp, device.dev_id, dialect.version_reply(self._firmware), report)
+            if renamed:
+                self._revoke_camera_address()
         if reread:
             if self.target is None or not self.fresh:
                 self._take_camera_down()
@@ -562,7 +622,7 @@ class Fleet:
             )
             if not sent:
                 # Not all of it reached the host: the next accepted status of this device sends it again.
-                with self._lock:
+                with self._publication, self._lock:
                     if self._target is not None and self._target.dev_id == connected:
                         self._connected = False
 
@@ -583,7 +643,7 @@ class Fleet:
 
     def _answer_halted(self) -> None:
         """A connect still waiting while its read is halted (401, 403, TLS, ...) hears the refusal once."""
-        with self._lock:
+        with self._publication, self._lock:
             if self._waiting is not None and self.poller.halted("printers") is not None:
                 waiting, self._waiting = self._waiting, None
             elif self._target is not None and not self._connected and self.poller.halted("status") is not None:

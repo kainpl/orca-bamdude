@@ -547,3 +547,166 @@ def test_an_announcement_of_a_replaced_map_is_dropped(monkeypatch):
     finally:
         release.set()
         worker.join(3)
+
+
+# -- the fix review: a proven namespace change revokes the camera's address; revocations meet the hand-over --------
+
+
+def _camera_rig(monkeypatch):
+    rig = Rig()
+    opened = []
+    monkeypatch.setattr(Client, "open_camera", lambda client, pid, identity: opened.append(1) or Picture())
+    relay = _real_relay(rig)
+    relay.start()
+    return rig, relay, opened
+
+
+def _status_of(url):
+    conn, response = _get(url)
+    status = response.status
+    response.close()
+    conn.close()
+    return status
+
+
+@pytest.mark.parametrize("seen_by", ["status", "list"])
+def test_a_namespace_change_revokes_the_old_camera_address_for_good(monkeypatch, seen_by):
+    rig, relay, opened = _camera_rig(monkeypatch)
+    try:
+        old = rig.connected()
+        old_url = rig.fleet.camera_url()
+        rig.server.epoch = "epoch-after-restore"  # the same printers, their numbers and identities kept
+        if seen_by == "status":
+            rig.step(5)
+        else:
+            rig.fleet.want_fleet(True)
+            rig.fleet.poller.wake("printers")
+            rig.fleet.tick()  # only the list is due: the status read is still 5 s away
+            rig.jobs.run_all()
+        rig.step()
+        new = rig.device_id()
+        assert new != old
+        rig.fleet.connect(new)
+        rig.step()
+        new_url = rig.fleet.camera_url()
+        assert new_url and new_url != old_url
+        assert _status_of(old_url) == 404 and opened == []  # the earlier namespace's address opens nothing
+    finally:
+        relay.stop(2)
+
+
+def test_an_ordinary_status_poll_keeps_the_camera_address(monkeypatch):
+    rig, relay, opened = _camera_rig(monkeypatch)
+    try:
+        rig.connected()
+        url = rig.fleet.camera_url()
+        for _ in range(4):
+            rig.step(5)
+        assert rig.fleet.camera_url() == url
+    finally:
+        relay.stop(2)
+
+
+def test_a_revocation_proven_after_the_stamp_check_still_stops_the_hand_over(monkeypatch):
+    # The fix review's window: the stamp was checked, the host call has not begun (something holds the callbacks'
+    # own lock, as a set_on_* does), and meanwhile a status proves the namespace changed.
+    rig = Rig()
+    rig.connected()
+    rig.take()
+    checked = threading.Event()
+    original = rig.fleet._holds_locked
+
+    def holds(stamp):
+        result = original(stamp)
+        if result:
+            checked.set()
+        return result
+
+    monkeypatch.setattr(rig.fleet, "_holds_locked", holds)
+    rig.callbacks._lock.acquire()
+    worker = threading.Thread(target=lambda: rig.fleet._push(force=True))
+    worker.start()
+    try:
+        assert checked.wait(2)
+        rig.server.epoch = "epoch-after-restore"
+        rig.fleet._deliver_status(rig.fleet._fetch_status())
+        assert rig.fleet.target is None
+    finally:
+        rig.callbacks._lock.release()
+        worker.join(3)
+    assert rig.take() == []
+
+
+def test_a_revocation_waits_for_a_hand_over_in_progress():
+    rig = Rig()
+    rig.connected()
+    inside, release = threading.Event(), threading.Event()
+    rig.callbacks.set("local_message", lambda *args: (inside.set(), release.wait(4)))
+    pusher = threading.Thread(target=lambda: rig.fleet._push(force=True))
+    pusher.start()
+    assert inside.wait(2)
+    rig.server.epoch = "epoch-after-restore"
+    answer = rig.fleet._fetch_status()
+    revoker = threading.Thread(target=lambda: rig.fleet._deliver_status(answer))
+    revoker.start()
+    try:
+        time.sleep(0.2)
+        assert revoker.is_alive() and rig.fleet.target is not None  # the hand-over that began finishes first
+    finally:
+        release.set()
+        pusher.join(3)
+        revoker.join(3)
+    assert rig.fleet.target is None
+
+
+@pytest.mark.parametrize("change", ["disconnect", "connect_other", "list_without_it"])
+def test_other_revocations_meet_the_hand_over_too(monkeypatch, change):
+    rig = Rig()
+    rig.connected()
+    rig.take()
+    checked = threading.Event()
+    original = rig.fleet._holds_locked
+    monkeypatch.setattr(rig.fleet, "_holds_locked", lambda stamp: original(stamp) and (checked.set() or True))
+    rig.callbacks._lock.acquire()
+    worker = threading.Thread(target=lambda: rig.fleet._push(force=True))
+    worker.start()
+    try:
+        assert checked.wait(2)
+        if change == "disconnect":
+            rig.fleet.disconnect()
+        elif change == "connect_other":
+            rig.fleet.connect("bamdude-another")
+        else:
+            rig.server.printers = rig.server.printers[1:]
+            rig.fleet._deliver_printers(rig.fleet._fetch_printers())
+    finally:
+        rig.callbacks._lock.release()
+        worker.join(3)
+    assert [e for e in rig.take() if e[0] == "local_message"] == []
+
+
+def test_a_rebind_from_inside_a_callback_neither_hangs_nor_loses_the_connect():
+    rig = Rig()
+    rig.fleet.rebind(snapshot(1))
+    rig.fleet.discover()
+    rig.step()
+    device = rig.device_id()
+    rig.fleet.connect(device)
+    native = rig.callbacks._fns["local_message"]
+    rebound = []
+
+    def callback(*args):
+        native(*args)
+        if not rebound:
+            rebound.append(1)
+            rig.fleet.rebind(snapshot(2))
+
+    rig.callbacks.set("local_message", callback)
+    worker = threading.Thread(target=rig.step)
+    worker.start()
+    worker.join(3)
+    assert not worker.is_alive()
+    rig.take()
+    rig.step()
+    assert ("local_connect", 0, device, "0") in rig.take()
+    assert rig.fleet.fresh
