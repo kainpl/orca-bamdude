@@ -37,6 +37,12 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 ## Layout
 
 - `src/orca_bamdude/config.py` — connection settings: canonical server URL, API key, CA as PEM text, proxy headers.
+- `settings.py` — the stored base, a preset override on top of it (address and CA only; the key and proxy headers
+  come from base alone), the tab's masked view and keep/replace/clear edits, and the permission target each setting
+  implies.
+- `permits.py` — which user-set targets a load asks OrcaSlicer for: an unfinished load (a refusal or a stop before
+  `on_load`) holds its targets, base included, until the tab asks again or a watched setting changes; a first
+  sighting is never a change. `locking.py` — the file lock the journal and the state file share.
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
