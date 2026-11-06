@@ -710,3 +710,34 @@ def test_a_rebind_from_inside_a_callback_neither_hangs_nor_loses_the_connect():
     rig.step()
     assert ("local_connect", 0, device, "0") in rig.take()
     assert rig.fleet.fresh
+
+
+@pytest.mark.parametrize("change", ["disconnect", "connect_other", "list_without_it", "rebind"])
+def test_every_revocation_waits_for_a_host_call_already_admitted(change):
+    # Between the admission and the end of the host call no change that voids the stamp may complete (F3).
+    rig = Rig()
+    rig.connected()
+    inside, release = threading.Event(), threading.Event()
+    rig.callbacks.set("local_message", lambda *args: (inside.set(), release.wait(4)))
+    pusher = threading.Thread(target=lambda: rig.fleet._push(force=True))
+    pusher.start()
+    assert inside.wait(2)
+    if change == "list_without_it":
+        rig.server.printers = rig.server.printers[1:]
+        answer = rig.fleet._fetch_printers()
+    actions = {
+        "disconnect": rig.fleet.disconnect,
+        "connect_other": lambda: rig.fleet.connect("bamdude-another"),
+        "list_without_it": lambda: rig.fleet._deliver_printers(answer),
+        "rebind": lambda: rig.fleet.rebind(snapshot(2, base=NEW)),
+    }
+    changer = threading.Thread(target=actions[change])
+    changer.start()
+    try:
+        time.sleep(0.2)
+        assert changer.is_alive() and rig.fleet.target is not None
+    finally:
+        release.set()
+        pusher.join(3)
+        changer.join(3)
+    assert not changer.is_alive()
