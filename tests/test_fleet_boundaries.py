@@ -474,3 +474,76 @@ def test_a_rebind_waits_for_a_hand_over_already_in_progress():
         pusher.join(3)
         rebinder.join(3)
     assert not rebinder.is_alive()
+
+
+@pytest.mark.parametrize("read", ["printers", "status"])
+def test_a_reads_next_request_is_not_sent_once_the_fence_is_up(read):
+    # The chain itself stops at the fence, whatever the client does with a close (here: nothing).
+    rig = Rig()
+    rig.connected()
+    caps = rig.server.capabilities
+
+    def capabilities_then_unload():
+        answer = caps()
+        rig.context.close()  # the plugin is turned off while the first request of the chain was out
+        return answer
+
+    rig.server.capabilities = capabilities_then_unload
+    rig.requests()
+    with pytest.raises(RuntimeError):
+        rig.fleet._fetch_printers() if read == "printers" else rig.fleet._fetch_status()
+    assert rig.requests() == ["capabilities"]
+
+
+def test_a_camera_admission_once_lost_comes_back_only_through_a_new_address():
+    rig = Rig()
+    rig.connected()
+    url = rig.fleet.camera_url()
+    target = rig.relay.target
+    assert url and rig.fleet.camera_admits(target)
+    rig.clock.advance(STALE_SECONDS)
+    rig.fleet.tick()  # stale: the camera is taken down
+    rig.step()  # fresh again
+    assert rig.fleet.fresh
+    assert not rig.fleet.camera_admits(target)  # the old admission is not regained by itself
+    assert rig.fleet.camera_url() and rig.fleet.camera_admits(target)  # OrcaSlicer asks again: a new one
+
+
+def test_the_runtimes_relay_asks_the_fleet(tmp_path):
+    runtime = Runtime(lambda *a: None, str(tmp_path), "L", requested=set(), decision={})
+    # Nothing is connected, so the fleet admits nothing -- and neither may the relay it built.
+    assert runtime.relay._admitted(Target(1, IDENTITY)) is False
+
+
+def test_an_announcement_of_a_replaced_map_is_dropped(monkeypatch):
+    # Within one era a newer list may drop a printer; the older list's announcement of it must not be handed over.
+    rig = Rig()
+    rig.fleet.rebind(snapshot(1))
+    rig.server.printers.append({"id": 3, "name": "Removed later", "connector_identity": "gone", "model_code": "C12"})
+    first = rig.fleet._fetch_printers()
+    rig.server.printers.pop()
+    second = rig.fleet._fetch_printers()
+    entered, release = threading.Event(), threading.Event()
+    emit, held = rig.fleet._emit, []
+
+    def pause_first(name, *args):
+        if not held:
+            held.append(1)
+            entered.set()
+            assert release.wait(4)
+        return emit(name, *args)
+
+    monkeypatch.setattr(rig.fleet, "_emit", pause_first)
+    worker = threading.Thread(target=lambda: rig.fleet._deliver_printers(first))
+    worker.start()
+    try:
+        assert entered.wait(2)
+        rig.fleet._deliver_printers(second)
+        rig.take()
+        release.set()
+        worker.join(3)
+        late = [json.loads(e[1])["dev_id"] for e in rig.take("ssdp")]
+        assert late == []  # nothing of the replaced map, the removed printer least of all
+    finally:
+        release.set()
+        worker.join(3)

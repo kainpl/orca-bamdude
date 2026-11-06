@@ -431,14 +431,16 @@ def test_a_target_no_longer_admitted_is_not_found_and_opens_nothing(admitted_rel
 
 def test_a_renewal_asks_for_admission_again(admitted_relays):
     allowed = {"now": True}
-    opener = Opener(FakeUpstream([FRAME], hold=False), FakeUpstream([FRAME + b"second"]))
+    first = FakeUpstream([FRAME], hold=True)  # this lease ends only when the test says so
+    opener = Opener(first, FakeUpstream([FRAME + b"second"]))
     relay, events = admitted_relays(opener, lambda target: allowed["now"])
     relay.set_target(PRINTER)
     conn, response = _get(relay.url_for(PRINTER))
     try:
         assert response.read(len(FRAME)) == FRAME
         allowed["now"] = False  # lost while the first lease played
-        assert response.read() == b""  # the lease ended and was not renewed
+        first.close()  # the server ends the lease
+        assert response.read() == b""  # and it is not renewed
     finally:
         conn.close()
     assert opener.targets == [PRINTER]

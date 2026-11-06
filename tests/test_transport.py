@@ -322,3 +322,34 @@ def test_a_stream_already_handed_over_is_its_owners_to_close(serve):
     transport.close()  # the stream is the relay's now: closing the transport does not pull it from under it
     assert stream.read(4)
     stream.close()
+
+
+def test_a_closed_transport_does_not_even_connect(serve, monkeypatch):
+    server, transport = serve(lambda m, p: _json(200, {}))
+    import http.client
+
+    connects = []
+    real = http.client.HTTPConnection.connect
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", lambda self: (connects.append(1), real(self))[1])
+    transport.close()
+    with pytest.raises(TransportError):
+        transport.request_json("GET", "/api/v1/connector/capabilities")
+    assert connects == []
+
+
+def test_a_close_while_connecting_sends_nothing(serve, monkeypatch):
+    server, transport = serve(lambda m, p: _json(200, {}))
+    import http.client
+
+    real = http.client.HTTPConnection.connect
+
+    def connect_then_closed(self):
+        transport.close()  # the owner's cancel lands before the socket exists: nothing for close() to abort
+        real(self)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", connect_then_closed)
+    with pytest.raises(TransportError) as refused:
+        transport.request_json("GET", "/api/v1/connector/capabilities")
+    assert refused.value.kind == "cancelled"
+    time.sleep(0.2)
+    assert server.seen == []
