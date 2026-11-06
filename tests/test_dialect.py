@@ -58,8 +58,8 @@ def status(**overrides):
                         "nozzle_temp_min": None,
                         "nozzle_temp_max": None,
                     },
-                    {"id": 2, "tray_type": None, "tray_color": None, "tray_info_idx": None, "remain": 0},
-                    {"id": 3, "tray_type": "", "tray_color": "", "tray_info_idx": "", "remain": 0},
+                    {"id": 2, "tray_type": None, "tray_color": None, "tray_info_idx": None, "remain": 0, "state": 9},
+                    {"id": 3, "tray_type": "", "tray_color": "", "tray_info_idx": "", "remain": 0, "state": 9},
                 ],
             }
         ],
@@ -257,11 +257,109 @@ def test_a_tray_without_a_filament_profile_still_names_its_type():
     assert tray == {"id": "0", "tray_type": "PLA", "tray_info_idx": "", "tray_color": "112233FF"}
 
 
-def test_an_ams_ht_unit_keeps_its_id_and_sets_no_four_slot_bits():
-    unit = {"id": 128, "is_ams_ht": True, "tray": [{"id": 0, "tray_type": "PETG", "tray_info_idx": "GFG00"}]}
+def _flag(info: str, start: int, count: int) -> int:
+    """rc ``DevUtil::get_flag_bits(std::string, start, count)``: the string read as hex."""
+    return (int(info, 16) >> start) & ((1 << count) - 1)
+
+
+@pytest.mark.parametrize("unit_id", [128, 129])
+def test_an_ams_ht_is_its_own_type_with_its_own_bits(unit_id):
+    # rc DevFilaSystemParser::ParseV1_0: the type is info bits 0-3 (N3S = 4, DevDefs.h); with no info it is 1, a
+    # plain AMS. An AMS HT's unit bit is 4 + (id - 128), its tray bit 16 + (id - 128).
+    unit = {
+        "id": unit_id,
+        "is_ams_ht": True,
+        "module_type": "n3s",
+        "tray": [{"id": 0, "tray_type": "PETG", "tray_info_idx": "GFG00", "exists": True}],
+    }
     ams = pushed(ams=[unit], tray_now=255)["ams"]
-    assert ams["ams"][0]["id"] == "128"
-    assert ams["ams_exist_bits"] == "0" and ams["tray_exist_bits"] == "0"
+    (sent,) = ams["ams"]
+    assert sent["id"] == str(unit_id)
+    assert _flag(sent["info"], 0, 4) == 4 and _flag(sent["info"], 8, 4) == 0  # N3S on the main extruder
+    assert int(ams["ams_exist_bits"], 16) == 1 << (4 + unit_id - 128)
+    assert int(ams["tray_exist_bits"], 16) == 1 << (16 + unit_id - 128)
+
+
+def test_an_empty_ams_ht_is_present_with_no_spool():
+    unit = {"id": 128, "module_type": "n3s", "tray": [{"id": 0, "tray_type": None, "exists": False, "state": 9}]}
+    ams = pushed(ams=[unit], tray_now=255)["ams"]
+    assert int(ams["ams_exist_bits"], 16) == 1 << 4 and int(ams["tray_exist_bits"], 16) == 0
+
+
+def test_a_plain_ams_beside_an_ams_ht_keeps_its_own_bits():
+    plain = {"id": 0, "module_type": "ams", "tray": [{"id": 1, "tray_type": "PLA", "tray_info_idx": "GFA00"}]}
+    ht = {"id": 128, "module_type": "n3s", "tray": [{"id": 0, "tray_type": "PETG", "tray_info_idx": "GFG00"}]}
+    ams = pushed(ams=[plain, ht], tray_now=255)["ams"]
+    assert int(ams["ams_exist_bits"], 16) == (1 << 0) | (1 << 4)
+    assert int(ams["tray_exist_bits"], 16) == (1 << 1) | (1 << 16)
+    assert "info" not in ams["ams"][0]  # a plain AMS keeps Orca's own default (AMS, or AMS Lite on an A1)
+
+
+def test_an_ams_2_pro_says_so():
+    unit = {"id": 0, "module_type": "n3f", "tray": [{"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00"}]}
+    (sent,) = pushed(ams=[unit])["ams"]["ams"]
+    assert _flag(sent["info"], 0, 4) == 3 and _flag(sent["info"], 8, 4) == 0
+
+
+@pytest.mark.parametrize(
+    ("tray", "present"),
+    [
+        ({"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00", "exists": False, "state": 9}, False),
+        ({"id": 0, "tray_type": None, "exists": True, "state": 10}, True),  # a spool Orca cannot identify
+        ({"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00", "exists": True}, True),
+        ({"id": 0, "tray_type": None, "exists": None, "state": 9}, False),
+        ({"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00", "exists": None, "state": 10}, True),
+        ({"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00", "exists": None, "state": 11}, True),
+        (
+            {"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00"},
+            True,
+        ),  # no presence bit at all: BamDude's own fallback
+        ({"id": 0}, True),  # nothing known: BamDude's UI shows "?", a spool it cannot name
+    ],
+)
+def test_presence_is_the_firmwares_bit_not_the_filament_profile(tray, present):
+    # BamDude's ``exists`` is the firmware's tray_exist_bits, what the printer itself would send; only without it does
+    # BamDude's own fallback apply, in its UI's order (amsHelpers.getEmptySlotKind): a type is a loaded slot, state 9
+    # or 10 an empty one, anything else a spool it cannot name. The profile never overrides the bit.
+    ams = pushed(ams=[{"id": 0, "tray": [tray]}])["ams"]
+    assert bool(int(ams["tray_exist_bits"], 16) & 1) is present
+
+
+def test_a_present_spool_without_a_profile_gets_no_invented_material():
+    (tray,) = pushed(ams=[{"id": 0, "tray": [{"id": 0, "tray_type": None, "exists": True}]}])["ams"]["ams"][0]["tray"]
+    assert tray == {"id": "0"}
+
+
+TWO_NOZZLES = [
+    {"nozzle_type": "hardened_steel", "nozzle_diameter": "0.4"},
+    {"nozzle_type": "hardened_steel", "nozzle_diameter": "0.4"},
+]
+
+
+def test_on_two_nozzles_an_ams_carries_the_extruder_the_printer_named():
+    # Without info Orca puts every AMS on its main (right) extruder; BamDude's ams_extruder_map holds the printer's
+    # own extruder ids (0 = right/main, 1 = left), the ids Orca reads from the same field.
+    units = [
+        {"id": 0, "module_type": "n3f", "tray": [{"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00"}]},
+        {"id": 1, "module_type": "ams", "tray": [{"id": 0, "tray_type": "PETG", "tray_info_idx": "GFG00"}]},
+        {"id": 128, "module_type": "n3s", "tray": [{"id": 0, "tray_type": "TPU", "tray_info_idx": "GFU01"}]},
+    ]
+    ams = pushed(ams=units, nozzles=TWO_NOZZLES, ams_extruder_map={"0": 1, "1": 0, "128": 1})["ams"]
+    sent = {u["id"]: u for u in ams["ams"]}
+    assert (_flag(sent["0"]["info"], 0, 4), _flag(sent["0"]["info"], 8, 4)) == (3, 1)
+    assert (_flag(sent["1"]["info"], 0, 4), _flag(sent["1"]["info"], 8, 4)) == (1, 0)
+    assert (_flag(sent["128"]["info"], 0, 4), _flag(sent["128"]["info"], 8, 4)) == (4, 1)
+
+
+def test_on_two_nozzles_an_ams_of_unknown_binding_or_type_is_left_out():
+    units = [
+        {"id": 0, "module_type": "n3f", "tray": [{"id": 0, "tray_type": "PLA"}]},  # no binding (e.g. a track switch)
+        {"id": 1, "module_type": "", "tray": [{"id": 0, "tray_type": "PLA"}]},  # bound, type unknown
+        {"id": 2, "module_type": "ams", "tray": [{"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00"}]},
+    ]
+    ams = pushed(ams=units, nozzles=TWO_NOZZLES, ams_extruder_map={"1": 0, "2": 1})["ams"]
+    assert [u["id"] for u in ams["ams"]] == ["2"]
+    assert int(ams["ams_exist_bits"], 16) == 1 << 2
 
 
 def test_no_ams_means_no_ams_object():
@@ -293,6 +391,30 @@ def test_the_external_spool_is_the_virtual_tray():
 def test_no_external_spool_means_no_virtual_tray():
     assert "vt_tray" not in pushed(vt_tray=[])
     assert "vt_tray" not in pushed(vt_tray=[{"id": 254, "tray_type": None}])
+
+
+LEFT = {"id": 254, "tray_type": "PLA", "tray_info_idx": "GFA00", "tray_color": "FF0000FF"}
+RIGHT = {"id": 255, "tray_type": "PETG", "tray_info_idx": "GFG00", "tray_color": "0000FFFF"}
+
+
+@pytest.mark.parametrize(
+    "spools", [[LEFT, RIGHT], [RIGHT, LEFT], [dict(LEFT, tray_type=None), RIGHT], [LEFT, dict(RIGHT, tray_type=None)]]
+)
+def test_on_two_nozzles_no_external_spool_is_moved_to_the_main_holder(spools):
+    # rc writes a single vt_tray into its main (right) holder whatever its id; BamDude's 254 is the left holder.
+    # Which side a spool is on is not guessed: on two nozzles the external spools are not sent.
+    p = pushed(nozzles=TWO_NOZZLES, temperatures={"bed": 60.0}, vt_tray=spools)
+    assert "vt_tray" not in p and "vir_slot" not in p
+
+
+def test_two_external_holders_mean_two_nozzles_even_without_nozzle_facts():
+    p = pushed(nozzles=[], temperatures={"bed": 60.0}, vt_tray=[LEFT, RIGHT])
+    assert "vt_tray" not in p
+
+
+def test_one_nozzle_and_one_external_spool_is_the_virtual_tray():
+    p = pushed(vt_tray=[LEFT])
+    assert p["vt_tray"]["tray_type"] == "PLA"
 
 
 # -- a printer BamDude cannot reach ----------------------------------------------------------------------------------
