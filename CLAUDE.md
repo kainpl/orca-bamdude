@@ -53,10 +53,14 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `poller.py` — the one poll scheduler: channels asked only while wanted, one request in flight each, backoff,
   halt on auth/configuration failures, answers of an older connection generation dropped, staleness.
 - `service.py` — one `Runtime` per load (capability refcount, admission before the fence, shutdown steps with
-  deadlines, settings snapshots and generations), its `LoadContext` fence that every callback handed to OrcaSlicer
-  checks, and the `Notifier` — the only caller of the blocking `push_notification`, never waited for at shutdown.
+  deadlines, settings snapshots by revision and generation), its `LoadContext` fence that every callback handed to
+  OrcaSlicer checks, the `Notifier` — the only caller of the blocking `push_notification`, never waited for at
+  shutdown — and the `StateWriter`, the one thread that writes `state.json`. Shutdown cleans up only after every
+  owner is known to have finished; the UI thread never waits for the state file's lock.
 - `orca_adapter.py` — the only module that imports `orca`: install facts, the one permission request, the
-  `BamDudePrinter` agent and the `BamDude` tab. `__init__.py` imports it only where `orca` exists.
+  `BamDudePrinter` agent and the `BamDude` tab. `__init__.py` imports it only where `orca` exists. The live preset
+  bundle is read on the UI thread only (`on_load` runs on OrcaSlicer's load thread); an override that cannot be
+  read refuses the connection rather than falling back to base.
 - `tests/` — pytest; `fakes.Server` is a scripted local HTTP server standing in for BamDude; `fake_orca.Host` stands
   in for OrcaSlicer 2.5.0-rc, modelling only what the rc source and the H-preflight runs proved. A host-facing change
   that needs behaviour the fake does not model is checked against the rc source first, then added to the fake.
