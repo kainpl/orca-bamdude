@@ -12,6 +12,8 @@ ignore = ["E501", "SIM105", "SIM108", "UP017"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG"]
+# The printer-agent binding fixes every method's signature; most arguments are unused until H2/H3.
+"src/orca_bamdude/orca_adapter.py" = ["ARG002"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["orca_bamdude"]
