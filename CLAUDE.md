@@ -46,16 +46,21 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   (`intent_basis`) and cannot undo a hold a later load made, in this state or in one started again since; past
   `MAX_HELD` everything is held and only what the tab names comes back. A state file that exists but cannot be read
   is never written over (`StateUnreadable`); only the import repairs it, as a new incarnation, and says so.
-  `locking.py` — the file lock the journal and the state file share, and `read_text` / `replace`: every read and
-  atomic replace of a shared file goes through them, because on Windows a lockless reader and a replace break each
-  other (PermissionError) for as long as the other side holds the file.
-- `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
+  `locking.py` — the file lock the journal and the state file share, and `read_text` / `replace`: the JSON files
+  more than one thread or OrcaSlicer process reads and replaces — `state.json`, journal records and namespace,
+  OrcaSlicer's `orca_plugins/config.json` — and the staged copy's replace go through them, because on Windows a
+  lockless reader and a replace break each other (PermissionError) for as long as the other side holds the file. A
+  new shared file goes through them too.
+- `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream). `close()` is
+  the owner's cancel: every request in flight ends, a stream still waiting for its headers too, and every later
+  request is refused before it connects; a stream already handed over stays its caller's.
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
 - `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision
   under a folder lock.
 - `camera_relay.py` — the loopback relay OrcaSlicer's FFmpeg plays the camera from (`/<secret>/<printer identity>` on
-  127.0.0.1); the upstream and its credentials stay in the client.
+  127.0.0.1); the upstream and its credentials stay in the client. Admission is its owner's (`admits`), asked at every
+  request, upstream open and renewal.
 - `poller.py` — the one poll scheduler: channels asked only while wanted, one request in flight each, backoff,
   halt on auth/configuration failures, answers of an older connection generation dropped, staleness; the server's
   floor learnt later (`limit`) resets nothing.
@@ -65,13 +70,19 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `dialect.py` — BamDude facts as the SSDP announcement, the `get_version` reply (`ota` only with a real firmware)
   and `push_status`, every key typed as the rc parser reads it; what is unknown is not sent, a printer BamDude cannot
   reach pushes only the keys true of the plugin, a second nozzle gets no nozzle temperature, no report carries a
-  `job_id`.
+  `job_id`. AMS per rc `DevFilaSystemParser`: type and extruder in `info`, AMS HT's own presence bits, a slot present
+  by the firmware's bit (`exists`) and never by its filament profile; on two nozzles nothing goes on a side BamDude did
+  not name (an unbound AMS and the external spools are left out).
 - `fleet.py` — one connection generation's farm: capabilities + printers read together (on discovery, and every
   minute only under the tab's demand), the connected device's status every 5 s stale or not, accepted only while the
   binding still yields its `dev_id` and the status names its identity; reports every 3 s while fresh, none while
   stale; `connect_printer` answers at once and the result follows through `local_connect`; a refusal is a sentence,
-  never `"5"`/`"-1"`; jobs and the camera only for the connected fresh device. Host callbacks are the fleet's to call
-  from its threads, never after the fence.
+  never `"5"`/`"-1"`; jobs and the camera only for the connected fresh device. Every read carries its generation and
+  era (a proven namespace change is a new era), every host message a stamp checked at the hand-over under a
+  publication lock `rebind` takes too; a status naming another printer revokes at once. The camera's admission is the
+  fleet's (`camera_admits`), and every loop step takes a camera no longer admitted down. `rebind` and `stop` close the
+  client: nothing of an older generation runs on. Host callbacks are the fleet's to call from its threads, never after
+  the fence.
 - `i18n.py` + `locales/{en,uk}.json` — the plugin's sentences, chosen by OrcaSlicer's language code (`uk*` →
   Ukrainian).
 - `service.py` — one `Runtime` per load (capability refcount, admission before the fence, shutdown steps with

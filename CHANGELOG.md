@@ -34,10 +34,14 @@
   and external spool on the Device tab, and its live camera through the local relay. Nothing BamDude does not know is
   shown as known: a printer BamDude cannot reach stays selectable -- the farm can still queue work for it -- but its
   state and temperatures are left out, and a printer with two nozzles shows no nozzle temperature rather than the
-  wrong one. When the farm stops answering, the plugin stops reporting and OrcaSlicer shows the printer offline about
-  a minute after the last answer; it comes back by itself when the farm answers again. After a restore, another key
+  wrong one -- nor an external spool or an AMS on a side BamDude did not name. An AMS HT and an AMS 2 Pro show as
+  what they are, and a slot shows a spool when the printer's own sensor says so, not because a filament was once set
+  for it. When the farm stops answering, the plugin stops reporting and OrcaSlicer shows the printer offline about
+  a minute after the last answer; it comes back by itself when the farm answers again. The camera plays only while
+  the printer is connected and up to date and your key may watch it: it stops when the printer goes stale, is
+  deselected, the connection or the key's rights change, or the plugin is turned off. After a restore, another key
   or another address, the earlier devices are not reused: OrcaSlicer says the printer belongs to an earlier BamDude
   connection, in English or Ukrainian as OrcaSlicer is set, and you choose it again. Without the tab open the plugin
-  reads only the printer you selected.
+  reads only the printer you selected, and turning the plugin off ends every request it had in flight.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.
