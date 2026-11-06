@@ -235,3 +235,90 @@ def test_a_server_the_ca_does_not_vouch_for_is_refused(host, ca):
         assert not server.seen  # nothing, the key included, was sent before the handshake failed
     finally:
         server.close()
+
+
+# -- the owner cancels what is in flight (H2 review R3) ------------------------------------------------------------
+
+
+def _held(release):
+    def routes(method, path):
+        release.wait(10)
+        return _json(200, {"late": True})
+
+    return routes
+
+
+def test_close_ends_a_request_waiting_for_its_answer(serve):
+    release = threading.Event()
+    server, transport = serve(_held(release))
+    outcome = {}
+
+    def ask():
+        try:
+            outcome["value"] = transport.request_json("GET", "/api/v1/connector/capabilities")
+        except TransportError as exc:
+            outcome["kind"] = exc.kind
+
+    worker = threading.Thread(target=ask)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        started = time.monotonic()
+        transport.close()
+        worker.join(3)
+        assert not worker.is_alive() and time.monotonic() - started < 2
+        assert outcome == {"kind": "cancelled"}
+    finally:
+        release.set()
+        worker.join(5)
+
+
+def test_after_close_nothing_is_sent(serve):
+    server, transport = serve(lambda m, p: _json(200, {}))
+    transport.close()
+    for call in (
+        lambda: transport.request_json("GET", "/api/v1/connector/capabilities"),
+        lambda: transport.open_stream("/api/v1/printers/1/camera/stream"),
+    ):
+        with pytest.raises(TransportError) as refused:
+            call()
+        assert refused.value.kind == "cancelled"
+    assert server.seen == []
+
+
+def test_close_ends_a_stream_still_waiting_for_its_headers(serve):
+    release = threading.Event()
+    server, transport = serve(_held(release))
+    outcome = {}
+
+    def open_it():
+        try:
+            outcome["stream"] = transport.open_stream("/api/v1/printers/1/camera/stream")
+        except TransportError as exc:
+            outcome["kind"] = exc.kind
+
+    worker = threading.Thread(target=open_it)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not server.seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        transport.close()
+        worker.join(3)
+        assert not worker.is_alive() and outcome == {"kind": "cancelled"}
+    finally:
+        release.set()
+        worker.join(5)
+
+
+def test_a_stream_already_handed_over_is_its_owners_to_close(serve):
+    def routes(method, path):
+        return 200, {"Content-Type": "multipart/x-mixed-replace; boundary=f"}, iter([b"--f\r\n", b"x" * 10])
+
+    server, transport = serve(routes)
+    stream = transport.open_stream("/api/v1/printers/1/camera/stream")
+    transport.close()  # the stream is the relay's now: closing the transport does not pull it from under it
+    assert stream.read(4)
+    stream.close()

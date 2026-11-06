@@ -87,15 +87,64 @@ class Transport:
         self._port = parts.port
         self._base_path = parts.path
         self._context = _ssl_context(connection.ca_pem) if parts.scheme == "https" else None
+        self._lock = threading.Lock()
+        self._live: set[http.client.HTTPConnection] = set()
+        self._closed = False
+
+    # ------------------------------------------------------------------ the owner's cancel (H2 review R3)
+
+    def close(self) -> None:
+        """End every request in flight and refuse every new one with ``cancelled``: the owner's unload or a new
+        connection generation. A stream already handed to its caller is the caller's to close."""
+        with self._lock:
+            self._closed = True
+            live = list(self._live)
+        for conn in live:
+            sock = conn.sock
+            if sock is not None:
+                _abort(sock)
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def _failure(self, kind: str) -> TransportError:
+        """What a failure means: once the owner closed the transport, every failure is its cancel."""
+        return TransportError("cancelled" if self.closed else kind)
+
+    def _connect(self, conn: http.client.HTTPConnection) -> None:
+        """Connect before anything is sent, then look again: a transport closed meanwhile sends nothing."""
+        try:
+            conn.connect()
+        except ssl.SSLError as exc:
+            raise self._failure("tls") from exc
+        except TimeoutError as exc:
+            raise self._failure("timeout") from exc
+        except (ConnectionError, OSError, http.client.HTTPException) as exc:
+            raise self._failure("connect") from exc
+        if self.closed:
+            raise TransportError("cancelled")
+
+    def _forget(self, conn: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._live.discard(conn)
+        conn.close()
 
     # ------------------------------------------------------------------ plumbing
 
     def _open(self, timeout: float | None = None) -> http.client.HTTPConnection:
         if self._scheme == "https":
-            return http.client.HTTPSConnection(
+            conn = http.client.HTTPSConnection(
                 self._host, self._port, timeout=timeout or self.timeout, context=self._context
             )
-        return http.client.HTTPConnection(self._host, self._port, timeout=timeout or self.timeout)
+        else:
+            conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout or self.timeout)
+        with self._lock:
+            if self._closed:
+                raise TransportError("cancelled")
+            self._live.add(conn)
+        return conn
 
     def _target(self, path: str, query: dict | Iterable | None) -> str:
         if not path.startswith("/api/v1/"):
@@ -112,15 +161,16 @@ class Transport:
         return headers
 
     def _send(self, conn: http.client.HTTPConnection, method: str, target: str, body, headers: dict):
+        self._connect(conn)
         try:
             conn.request(method, target, body=body, headers=headers)
             return conn.getresponse()
         except ssl.SSLError as exc:
-            raise TransportError("tls") from exc
+            raise self._failure("tls") from exc
         except TimeoutError as exc:
-            raise TransportError("timeout") from exc
+            raise self._failure("timeout") from exc
         except (ConnectionError, OSError, http.client.HTTPException) as exc:
-            raise TransportError("connect") from exc
+            raise self._failure("connect") from exc
 
     def _json(self, response: http.client.HTTPResponse) -> tuple[int, object]:
         status = response.status
@@ -129,7 +179,9 @@ class Transport:
         try:
             raw = _read_bounded(response, MAX_JSON_RESPONSE)
         except TimeoutError as exc:
-            raise TransportError("timeout") from exc
+            raise self._failure("timeout") from exc
+        except (ConnectionError, OSError, http.client.HTTPException) as exc:
+            raise self._failure("connect") from exc
         content_type = (response.getheader("Content-Type") or "").lower()
         payload = None
         if raw:
@@ -157,7 +209,7 @@ class Transport:
             response = self._send(conn, method, self._target(path, query), encoded, headers)
             return self._json(response)
         finally:
-            conn.close()
+            self._forget(conn)
 
     def upload_file(
         self,
@@ -174,6 +226,7 @@ class Transport:
         headers = self._headers({"Content-Type": "application/octet-stream", "Content-Length": str(size)})
         conn = self._open(timeout)
         try:
+            self._connect(conn)
             try:
                 conn.putrequest("POST", self._target(path, query), skip_accept_encoding=True)
                 for name, value in headers.items():
@@ -195,14 +248,14 @@ class Transport:
             except TransportError:
                 raise
             except ssl.SSLError as exc:
-                raise TransportError("tls") from exc
+                raise self._failure("tls") from exc
             except TimeoutError as exc:
-                raise TransportError("timeout") from exc
+                raise self._failure("timeout") from exc
             except (ConnectionError, OSError, http.client.HTTPException) as exc:
-                raise TransportError("connect") from exc
+                raise self._failure("connect") from exc
             return self._json(response)
         finally:
-            conn.close()
+            self._forget(conn)
 
     def open_stream(self, path: str, *, headers: dict | None = None, query=None, timeout: float = 15.0) -> Stream:
         """An open streaming answer (the camera); the caller reads it and closes it. Never follows a redirect.
@@ -211,6 +264,7 @@ class Transport:
         """
         conn = self._open(timeout)
         try:
+            self._connect(conn)
             try:
                 conn.request("GET", self._target(path, query), headers=self._headers(headers or {}))
                 # Kept before the answer is read: http.client may hand the socket to the response and forget it,
@@ -218,19 +272,26 @@ class Transport:
                 sock = conn.sock
                 response = conn.getresponse()
             except ssl.SSLError as exc:
-                raise TransportError("tls") from exc
+                raise self._failure("tls") from exc
             except TimeoutError as exc:
-                raise TransportError("timeout") from exc
+                raise self._failure("timeout") from exc
             except (ConnectionError, OSError, http.client.HTTPException) as exc:
-                raise TransportError("connect") from exc
+                raise self._failure("connect") from exc
             if 300 <= response.status < 400:
                 raise TransportError("redirect")
             if response.status >= 400:
                 self._json(response)  # raises the server's refusal
         except BaseException:
-            conn.close()
+            self._forget(conn)
             raise
-        return Stream(conn, sock, response)
+        with self._lock:
+            self._live.discard(conn)  # the stream is its caller's now: closing the transport no longer touches it
+            closed = self._closed
+        stream = Stream(conn, sock, response)
+        if closed:
+            stream.close()
+            raise TransportError("cancelled")
+        return stream
 
 
 class Stream:
