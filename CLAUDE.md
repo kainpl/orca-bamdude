@@ -52,8 +52,12 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   lockless reader and a replace break each other (PermissionError) for as long as the other side holds the file. A
   new shared file goes through them too.
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream). `close()` is
-  the owner's cancel: every request in flight ends, a stream still waiting for its headers too, and every later
-  request is refused before it connects; a stream already handed over stays its caller's.
+  the owner's cancel: the transport makes each connection's socket and holds it from before it connects through the
+  TLS handshake to the end of the answer, so a close ends any of them, an answer read after it is not returned, and
+  every later request is refused before it connects; a stream already handed over stays its caller's. ⚠️ It connects
+  by the configured host name and raises `http.client.connect` itself: OrcaSlicer's audit covers socket events only
+  under http.client's own frames, and matches a `socket.connect` outside them against its target, so connecting to a
+  resolved address from plugin code would be refused for a host-name grant. Never hand `socket.connect` an address.
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
 - `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision
@@ -78,9 +82,12 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   binding still yields its `dev_id` and the status names its identity; reports every 3 s while fresh, none while
   stale; `connect_printer` answers at once and the result follows through `local_connect`; a refusal is a sentence,
   never `"5"`/`"-1"`; jobs and the camera only for the connected fresh device. Every read carries its generation and
-  era (a proven namespace change is a new era), every host message a stamp checked at the hand-over under a
-  publication lock `rebind` takes too; a status naming another printer revokes at once. The camera's admission is the
-  fleet's (`camera_admits`), and every loop step takes a camera no longer admitted down. `rebind` and `stop` close the
+  era; a namespace change proven by a status or by the list is a new era and rotates the relay's secret, as a rebind
+  does. Every host message carries a stamp checked once more inside `HostCallbacks.call`, under its lock and the
+  publication lock, to the end of the host call; every change that can void a stamp takes the publication lock and
+  hands over only after releasing it. One lock order: callbacks → publication → state. A status naming another
+  printer revokes at once. The camera's admission is the fleet's (`camera_admits`), and every loop step takes a
+  camera no longer admitted down. `rebind` and `stop` close the
   client: nothing of an older generation runs on. Host callbacks are the fleet's to call from its threads, never after
   the fence.
 - `i18n.py` + `locales/{en,uk}.json` — the plugin's sentences, chosen by OrcaSlicer's language code (`uk*` →
