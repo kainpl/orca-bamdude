@@ -119,9 +119,13 @@ def _begin(facts: dict, storage: str | None, load_id: str) -> tuple[set[str], di
         return state
 
     try:
-        permits.update_state(storage, change)
+        # The one deliberate repair of an unreadable state: its holds are lost, so at worst one refusal repeats; every
+        # later write refuses such a state instead (H1 fix3 review F1-R2).
+        permits.update_state(storage, change, repair=True, on_repair=lambda: out.update(repaired=True))
     except OSError:
         return current, {"previous_load": None, "held_now": [], "state_error": True}
+    if out.get("repaired"):
+        out["decision"]["state_repaired"] = True
     return out["requested"], out["decision"]
 
 

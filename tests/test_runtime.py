@@ -9,7 +9,15 @@ import pytest
 
 from orca_bamdude import permits, service
 from orca_bamdude.locking import FileLock
-from orca_bamdude.permits import ask_again, begin_load, complete_load, hold_epoch, is_held, read_state
+from orca_bamdude.permits import (
+    ask_again,
+    begin_load,
+    complete_load,
+    hold_epoch,
+    is_held,
+    load_state,
+    read_state,
+)
 from orca_bamdude.service import Runtime
 
 KEY = "bd_secret_key_SENTINEL"
@@ -499,3 +507,55 @@ def test_an_unreadable_state_gives_no_client(tmp_path):
     runtime = make(tmp_path, requested={A})
     snap = runtime.apply_settings(BASE, None, None)
     assert snap.connection is None and snap.blocked == "state_unreadable"
+
+
+# -- an unreadable state is never written over by an ordinary write (H1 fix3 review F1-R2) ------------------------
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]"], ids=["corrupt-json", "non-object"])
+def test_an_observation_never_repairs_an_unreadable_state(tmp_path, content):
+    runtime = make(tmp_path, requested={A})
+    runtime.update_state(lambda s: begin_load(s, "L1", {A})[0])
+    runtime.loaded()
+    (tmp_path / "state.json").write_text(content, encoding="utf-8")  # damaged before the first UI entry
+    before = (tmp_path / "state.json").read_bytes()
+    assert runtime.apply_settings(BASE, None, None).blocked == "state_unreadable"
+    assert runtime.flush(5)
+    assert (tmp_path / "state.json").read_bytes() == before
+    assert runtime.snapshot.blocked == "state_unreadable" and runtime.snapshot.connection is None
+
+
+def test_a_failed_read_inside_the_writer_neither_erases_a_hold_nor_unblocks(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A})
+    runtime.update_state(lambda s: {"held_targets": [A], "hold_epoch": 1})
+    original = permits.load_state
+    failed = []
+
+    def unreadable_once(folder):
+        # The snapshot's read works; only the writer's transaction read fails, as a transient read error would.
+        if threading.current_thread() is runtime.state_writer.thread and not failed:
+            failed.append(True)
+            return None
+        return original(folder)
+
+    monkeypatch.setattr(permits, "load_state", unreadable_once)
+    assert runtime.apply_settings(BASE, None, None).blocked == "held"  # a first sighting
+    assert runtime.flush(5) and failed
+    assert original(str(tmp_path)) == {"held_targets": [A], "hold_epoch": 1}
+    assert runtime.snapshot.blocked == "held" and runtime.snapshot.connection is None
+
+
+def test_a_tab_retry_over_an_unreadable_state_is_reported_not_recorded(tmp_path):
+    runtime = make(tmp_path, requested={A})
+    (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
+    done = []
+    assert runtime.ask_again([A], done=done.append)
+    assert runtime.flush(5) and done == [False]
+    assert load_state(str(tmp_path)) is None
+
+
+def test_on_load_over_an_unreadable_state_writes_nothing_and_does_not_raise(tmp_path):
+    runtime = make(tmp_path)
+    (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
+    assert runtime.loaded() is False
+    assert (tmp_path / "state.json").read_text(encoding="utf-8") == "{not json"

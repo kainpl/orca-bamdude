@@ -266,6 +266,16 @@ def test_under_hold_everything_the_tab_asks_again_only_for_the_current_settings(
     assert "https://farm.example" in network and "https://other.example" not in network
 
 
+def test_the_import_repairs_an_unreadable_state_and_the_tab_says_so(host):
+    # The import is the one deliberate repair (H1 fix3 review F1-R2); every later write refuses an unreadable state.
+    host.write_base(AGENT, BASE)
+    host.storage_dir.mkdir(parents=True, exist_ok=True)
+    (host.storage_dir / "state.json").write_text("{not json", encoding="utf-8")
+    assert host.load()
+    assert json.loads((host.storage_dir / "state.json").read_text(encoding="utf-8"))["load_marker"]["completed"]
+    assert adapter(host).RUNTIME.view()["state_repaired"] is True
+
+
 def test_saving_the_base_in_the_tab_writes_it_and_is_an_explicit_retry(host):
     host.write_base(AGENT, BASE)
     host.prompt_answer = False

@@ -27,7 +27,8 @@ Targets are typed strings, ``<bucket>:<target>`` (see ``settings.slot_targets``)
 secret. The fixed targets (threads, the temp model tree, the relay) are the adapter's and are always asked for.
 
 The state file is shared by OrcaSlicer's overlapping processes, so each change is one read-change-write under the
-storage folder's lock.
+storage folder's lock. A state file that exists but cannot be read is never written over by an ordinary change: its
+holds are unknown, and starting it again from empty would release them. Only the import repairs it, explicitly.
 """
 
 from __future__ import annotations
@@ -46,6 +47,11 @@ MAX_HELD = 32
 
 class StaleIntent(Exception):
     """A release formed before a newer hold: the newer refusal stands, and nothing is written."""
+
+
+class StateUnreadable(Exception):
+    """The state file exists but cannot be read: what it holds is unknown, so nothing is written over it (H1 fix3
+    review F1-R2)."""
 
 
 def _targets(value) -> list[str]:
@@ -182,11 +188,23 @@ def read_state(folder: str) -> dict:
     return state if state is not None else {}
 
 
-def update_state(folder: str, change, timeout: float = LOCK_TIMEOUT) -> dict:
-    """Read, ``change`` and replace the state atomically under the folder's lock; returns what was written."""
+def update_state(folder: str, change, timeout: float = LOCK_TIMEOUT, repair: bool = False, on_repair=None) -> dict:
+    """Read, ``change`` and replace the state atomically under the folder's lock; returns what was written.
+
+    A state that exists but cannot be read raises ``StateUnreadable`` and nothing is written (H1 fix3 review F1-R2).
+    ``repair`` is the import's one deliberate exception: it starts such a state again from empty and calls
+    ``on_repair`` -- under the lock, so that the caller can say so. A missing state is a first start, not a repair.
+    """
     os.makedirs(folder, exist_ok=True)
     with FileLock(os.path.join(folder, STATE_LOCK), timeout):
-        state = change(read_state(folder))
+        state = load_state(folder)
+        if state is None:
+            if not repair:
+                raise StateUnreadable
+            if on_repair is not None:
+                on_repair()
+            state = {}
+        state = change(state)
         path = os.path.join(folder, STATE_FILE)
         temp = f"{path}.{os.getpid()}.tmp"
         try:

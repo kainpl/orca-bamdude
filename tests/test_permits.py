@@ -9,6 +9,7 @@ from orca_bamdude.permits import (
     MAX_HELD,
     MAX_PENDING,
     StaleIntent,
+    StateUnreadable,
     ask_again,
     begin_load,
     complete_load,
@@ -217,6 +218,25 @@ def test_a_decision_tells_a_missing_state_from_an_unreadable_one(tmp_path):
     assert load_state(folder) is None
     (tmp_path / "state.json").write_text(json.dumps({"held_targets": [A]}), encoding="utf-8")
     assert load_state(folder) == {"held_targets": [A]}
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]"], ids=["corrupt-json", "non-object"])
+def test_a_change_never_writes_over_an_unreadable_state(tmp_path, content):
+    # H1 fix3 review F1-R2: unknown holds are not erased by an ordinary write.
+    (tmp_path / "state.json").write_text(content, encoding="utf-8")
+    before = (tmp_path / "state.json").read_bytes()
+    with pytest.raises(StateUnreadable):
+        update_state(str(tmp_path), lambda s: {**s, "pending_targets": [A]})
+    assert (tmp_path / "state.json").read_bytes() == before
+
+
+def test_only_the_explicit_repair_starts_an_unreadable_state_again(tmp_path):
+    repaired = []
+    update_state(str(tmp_path), lambda s: {**s, "n": 1}, repair=True, on_repair=lambda: repaired.append(True))
+    assert repaired == []  # a missing state is a first start, not a repair
+    (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
+    written = update_state(str(tmp_path), lambda s: {**s, "n": 2}, repair=True, on_repair=lambda: repaired.append(1))
+    assert repaired == [1] and written == {"n": 2} and read_state(str(tmp_path)) == {"n": 2}
 
 
 def test_update_state_is_one_read_change_write_under_the_lock(tmp_path):

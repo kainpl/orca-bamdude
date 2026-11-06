@@ -471,9 +471,16 @@ class Runtime:
     def flush(self, timeout: float) -> bool:
         return self.state_writer.flush(timeout)
 
-    def loaded(self) -> None:
-        """``on_load`` ran (on OrcaSlicer's load thread, not the UI thread): this load's request was granted."""
-        self.update_state(lambda s: permits.complete_load(s, self.load_id))
+    def loaded(self) -> bool:
+        """``on_load`` ran (on OrcaSlicer's load thread, not the UI thread): this load's request was granted.
+
+        A state that became unreadable since the import is left as it is: its marker stays unfinished as far as
+        anyone can tell, and the next import repairs it (H1 fix3 review F1-R2)."""
+        try:
+            self.update_state(lambda s: permits.complete_load(s, self.load_id))
+        except permits.StateUnreadable:
+            return False
+        return True
 
     def update_state(self, change) -> dict:
         """A synchronous state change, for import and ``on_load`` only -- never on the UI thread."""
@@ -486,6 +493,7 @@ class Runtime:
         snapshot = self.snapshot
         out = {
             "previous_load": self.decision.get("previous_load"),
+            "state_repaired": self.decision.get("state_repaired") is True,
             "held": sorted(self.held()),
             "held_all": self.holds_everything(),
             "generation": snapshot.generation if snapshot else 0,
