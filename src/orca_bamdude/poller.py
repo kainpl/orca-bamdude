@@ -108,6 +108,12 @@ class Poller:
             for channel in self._channels.values():
                 channel.failures, channel.halted, channel.last_success, channel.next_due = 0, None, None, now
 
+    def limit(self, *, poll_min_seconds: float) -> None:
+        """The server's floor, learnt from its capabilities after the connection was configured: it lengthens the
+        intervals from the next answer on and resets nothing -- not a halt, not a channel's last success."""
+        with self._lock:
+            self._poll_min = float(poll_min_seconds or 0)
+
     @property
     def generation(self) -> int:
         with self._lock:

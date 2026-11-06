@@ -140,6 +140,47 @@ def test_no_interval_is_shorter_than_the_servers_minimum(rig):
     assert status.calls == 2
 
 
+def test_a_minimum_learnt_later_applies_from_the_next_answer_without_starting_over(rig):
+    # The floor arrives with the capabilities, after the connection was configured: it must not reset a halt or
+    # the channel's last success, only lengthen what comes next.
+    poller, clock, jobs = rig
+    status, other = Channel(), Channel(HttpError(401, "unauthorized", ""))
+    _add(poller, "status", 5, status)
+    _add(poller, "other", 5, other)
+    poller.tick()
+    jobs.run_all()
+    seen = poller.last_success("status")
+    assert poller.halted("other") == "unauthorized"
+
+    poller.limit(poll_min_seconds=12)
+    assert poller.halted("other") == "unauthorized" and poller.last_success("status") == seen
+    clock.advance(5)  # the interval the answer was scheduled with still holds
+    poller.tick()
+    jobs.run_all()
+    assert status.calls == 2
+    clock.advance(11.9)
+    poller.tick()
+    jobs.run_all()
+    assert status.calls == 2
+    clock.advance(0.2)
+    poller.tick()
+    jobs.run_all()
+    assert status.calls == 3
+
+
+def test_a_lower_minimum_never_shortens_below_a_channels_own_interval(rig):
+    poller, clock, jobs = rig
+    status = Channel()
+    _add(poller, "status", 5, status)
+    poller.limit(poll_min_seconds=0)
+    poller.tick()
+    jobs.run_all()
+    clock.advance(4.9)
+    poller.tick()
+    jobs.run_all()
+    assert status.calls == 1
+
+
 def test_a_transient_failure_backs_off_to_a_ceiling_and_success_resets_it(rig):
     poller, clock, jobs = rig
     status = Channel(*([TransportError("timeout")] * 8))  # eight failures, then answers
