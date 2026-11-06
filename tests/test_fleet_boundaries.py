@@ -447,3 +447,30 @@ def test_a_rebind_cancels_the_older_generations_reads():
     first = rig.fleet._client
     rig.fleet.rebind(snapshot(2, base=NEW))
     assert first.closed and not rig.fleet._client.closed
+
+
+def test_a_rebind_waits_for_a_hand_over_already_in_progress():
+    # After rebind returns, nothing computed under the old generation is handed to the host: one already being handed
+    # over finishes first (the host's callbacks only re-post, so the wait is short).
+    rig = Rig()
+    rig.connected()
+    inside, release = threading.Event(), threading.Event()
+
+    def slow_host(*args):
+        inside.set()
+        release.wait(4)
+
+    rig.callbacks.set("local_message", slow_host)
+    pusher = threading.Thread(target=lambda: rig.fleet._push(force=True))
+    pusher.start()
+    assert inside.wait(2)
+    rebinder = threading.Thread(target=lambda: rig.fleet.rebind(snapshot(2, base=NEW)))
+    rebinder.start()
+    try:
+        time.sleep(0.2)
+        assert rebinder.is_alive()  # waits for the hand-over that had begun
+    finally:
+        release.set()
+        pusher.join(3)
+        rebinder.join(3)
+    assert not rebinder.is_alive()
