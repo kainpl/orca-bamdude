@@ -3,14 +3,17 @@
 import json
 import threading
 
+import pytest
+
 from orca_bamdude.permits import (
     MAX_HELD,
     MAX_PENDING,
+    StaleIntent,
     ask_again,
-    ask_again_all,
     begin_load,
     complete_load,
     held,
+    hold_epoch,
     holds_everything,
     is_held,
     read_state,
@@ -79,20 +82,20 @@ def test_two_aborted_loads_in_a_row_keep_the_earlier_hold():
 
 def test_a_change_a_runtime_saw_releases_the_new_value_and_queues_it():
     # Which values changed is decided by the Runtime that saw them (H1 review R5); the state only records it.
-    state = record_observation({"held_targets": [A]}, changed=[A], first=[])
+    state = record_observation({"held_targets": [A]}, changed=[A], first=[], epoch=0)
     assert held(state) == set() and state["pending_targets"] == [A]
     _, requested, _ = started(state, "L9", {A})
     assert A in requested
 
 
 def test_a_first_sighting_is_queued_unless_held_and_never_releases_a_hold():
-    state = record_observation({"held_targets": [A]}, changed=[], first=[A, DASH_A])
+    state = record_observation({"held_targets": [A]}, changed=[], first=[A, DASH_A], epoch=0)
     assert held(state) == {A}
     assert state["pending_targets"] == [DASH_A]
 
 
 def test_the_state_keeps_no_shared_baseline_of_what_was_seen():
-    state = record_observation({}, changed=[B], first=[A])
+    state = record_observation({}, changed=[B], first=[A], epoch=0)
     assert "last_seen" not in state
 
 
@@ -111,19 +114,74 @@ def test_a_full_hold_list_holds_everything_instead_of_forgetting_the_oldest():
 
 def test_under_hold_everything_only_an_explicit_target_comes_back():
     state = {"held_all": True, "held_targets": [A]}
-    state = ask_again(state, [B])
+    state = ask_again(state, [B], epoch=hold_epoch(state))
     assert not is_held(state, B) and is_held(state, A)
     _, requested, _ = started(state, "L1", {A, B})
     assert requested == {B}
-    state = ask_again_all(state, [A])
-    assert not holds_everything(state) and held(state) == set()
-    _, requested, _ = started(state, "L2", {A, B})
-    assert requested == {A, B}
+
+
+def test_a_retry_of_the_current_settings_under_hold_everything_leaves_other_refusals_held():
+    # H1 fix review F2: an older refusal that is no current setting stays held, even while it is still pending.
+    holds = [B] + [f"network:https://h{i}.example" for i in range(MAX_HELD - 1)]
+    state = {
+        "held_targets": holds,
+        "pending_targets": [B],
+        "load_marker": {"id": "x", "targets": [A], "completed": False},
+    }
+    state, requested, _ = started(state, "overflow", {A})
+    assert holds_everything(state) and requested == set()
+    state = ask_again(state, [A], epoch=hold_epoch(state))
+    state, requested, _ = started(state, "next", {A})
+    assert requested == {A} and is_held(state, B)
+    state, requested, _ = started(state, "after", {A})  # "next" was refused: A is held again
+    assert is_held(state, A) and requested == set()
+
+
+def test_a_new_refusal_under_hold_everything_re_holds_only_what_that_load_asked_for():
+    state = {"held_targets": [f"network:https://h{i}.example" for i in range(MAX_HELD)], "held_all": True}
+    state = ask_again(state, [A], epoch=hold_epoch(state))
+    state, requested, _ = started(state, "L1", set())
+    assert requested == {A}  # L1 is refused: on_load never runs
+    state = ask_again(state, [B], epoch=hold_epoch(state))
+    state, requested, _ = started(state, "L2", set())
+    assert is_held(state, A) and requested == {B}  # B, released explicitly, stays released
+
+
+# -- an intent is judged against the holds made after it (H1 fix review F1) ----------------------------------------
+
+
+def test_only_a_load_that_holds_something_advances_the_hold_epoch():
+    state, _, _ = started({}, "L1", {A})
+    assert hold_epoch(state) == 0
+    state, _, _ = started(state, "L2", {A})  # L1 unfinished: A held
+    assert hold_epoch(state) == 1
+    state = complete_load(state, "L2")
+    state, _, _ = started(state, "L3", {A})
+    assert hold_epoch(state) == 1
+
+
+def test_a_retry_formed_before_a_newer_hold_is_refused_whole():
+    state, _, _ = started({}, "L1", {A})
+    formed = hold_epoch(state)
+    state, _, _ = started(state, "L2", {A})  # the refusal is detected after the retry was formed
+    with pytest.raises(StaleIntent):
+        ask_again(state, [A], epoch=formed)
+    state = ask_again(state, [A], epoch=hold_epoch(state))  # one formed after it is honoured
+    assert not is_held(state, A)
+
+
+def test_a_change_seen_before_a_newer_hold_counts_only_as_a_first_sighting():
+    state, _, _ = started({}, "L1", {A})
+    formed = hold_epoch(state)
+    state, _, _ = started(state, "L2", {A, DASH_A})  # A held; DASH_A asked for, not held
+    state = record_observation(state, changed=[A, DASH_A], first=[], epoch=formed)
+    assert is_held(state, A)
+    assert state["pending_targets"] == [DASH_A]
 
 
 def test_asking_again_releases_and_queues_the_target():
     state = {"held_targets": [A, DASH_A]}
-    state = ask_again(state, [A])
+    state = ask_again(state, [A], epoch=hold_epoch(state))
     assert held(state) == {DASH_A}
     _, requested, _ = started(state, "L5", set())
     assert requested == {A}  # pending even when no current setting names it
@@ -133,7 +191,7 @@ def test_pending_keeps_the_newest_few_and_is_asked_for_minus_holds():
     state = {}
     targets = [f"network:https://h{i}.example" for i in range(MAX_PENDING + 3)]
     for target in targets:
-        state = ask_again(state, [target])
+        state = ask_again(state, [target], epoch=hold_epoch(state))
     assert state["pending_targets"] == targets[-MAX_PENDING:]
     state["held_targets"] = [targets[-1]]
     _, requested, _ = started(state, "L1", set())

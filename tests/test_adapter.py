@@ -13,6 +13,7 @@ import pytest
 from fake_orca import Host, storage_files
 
 from orca_bamdude.locking import FileLock
+from orca_bamdude.permits import MAX_HELD, begin_load
 
 AGENT = "BamDudePrinter"
 PAGE = "BamDude"
@@ -238,6 +239,31 @@ def test_the_page_never_waits_for_the_state_file_lock(host):
         release.set()
         holder.join(5)
     assert wait_for(lambda: any(p.get("recorded") is True for p in host.page_posts))
+
+
+def test_under_hold_everything_the_tab_asks_again_only_for_the_current_settings(host):
+    # H1 fix review F2: an older refused address that is no current setting stays held, even while pending.
+    host.write_base(AGENT, BASE)
+    assert host.load()
+    farm, other = "network:https://farm.example", "network:https://other.example"
+    holds = [other] + [f"network:https://h{i}.example" for i in range(MAX_HELD - 1)]
+
+    def overflow(state):
+        state = {
+            **state,
+            "held_targets": holds,
+            "pending_targets": [other],
+            "load_marker": {"id": "refused", "targets": [farm], "completed": False},
+        }
+        return begin_load(state, "recovered", {farm})[0]
+
+    adapter(host).RUNTIME.update_state(overflow)
+    host.page_message({"op": "ask_again"})
+    assert wait_for(lambda: any(p.get("recorded") is True for p in host.page_posts))
+    host.unload()
+    assert host.load()
+    network = host.requests[-1]["network"]
+    assert "https://farm.example" in network and "https://other.example" not in network
 
 
 def test_saving_the_base_in_the_tab_writes_it_and_is_an_explicit_retry(host):

@@ -4,9 +4,9 @@ snapshot and its generation, the permission targets it may use, and shutdown in 
 import threading
 import time
 
-from orca_bamdude import service
+from orca_bamdude import permits, service
 from orca_bamdude.locking import FileLock
-from orca_bamdude.permits import read_state
+from orca_bamdude.permits import begin_load, is_held, read_state
 from orca_bamdude.service import Runtime
 
 KEY = "bd_secret_key_SENTINEL"
@@ -290,3 +290,76 @@ def test_shutdown_drains_the_state_writes_it_already_accepted(tmp_path):
     runtime.shutdown("unload")
     assert B in read_state(str(tmp_path))["pending_targets"]
     assert runtime.ask_again([A]) is False  # nothing new after the fence
+
+
+# -- the state writer against the fence and against newer holds (H1 fix review F1) --------------------------------
+
+
+def test_state_requests_close_with_the_runtime_fence(tmp_path):
+    runtime = make(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    runtime.on_shutdown("stop", lambda: (entered.set(), release.wait(5)))
+    worker = threading.Thread(target=runtime.shutdown, args=("unload",))
+    worker.start()
+    done = []
+    try:
+        assert entered.wait(5) and runtime.stopping
+        assert runtime.ask_again([A], done=done.append) is False  # no window between the fence and the writer
+    finally:
+        release.set()
+        worker.join(5)
+    assert A not in read_state(str(tmp_path)).get("pending_targets", [])
+
+
+def _late_writer(runtime, monkeypatch):
+    """Hold this runtime's state writer just before its transaction, as a slow disk or a busy lock would."""
+    entered, release = threading.Event(), threading.Event()
+    original = permits.update_state
+
+    def late(folder, change, *args, **kwargs):
+        if threading.current_thread() is runtime.state_writer.thread:
+            entered.set()
+            assert release.wait(5)
+        return original(folder, change, *args, **kwargs)
+
+    monkeypatch.setattr(permits, "update_state", late)
+    return entered, release, original
+
+
+def _refused_then_held(write, folder):
+    """The next load asks for A and is refused (``on_load`` never runs); the load after it holds A."""
+    write(folder, lambda s: begin_load(s, "refused", {A})[0])
+    write(folder, lambda s: begin_load(s, "after", {A})[0])
+
+
+def test_a_late_write_of_an_old_load_cannot_undo_a_newer_refusal(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    entered, release, write = _late_writer(runtime, monkeypatch)
+    monkeypatch.setattr(service, "STEP_DEADLINE", 0.05)
+    try:
+        runtime.apply_settings(BASE, None, None)  # this load saw other -> farm: a change it would release
+        assert entered.wait(5)
+        assert runtime.shutdown("unload")["unfinished"] == ["state"]
+        _refused_then_held(write, str(tmp_path))
+        assert is_held(read_state(str(tmp_path)), A)
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    assert is_held(read_state(str(tmp_path)), A)
+
+
+def test_a_retry_formed_before_a_newer_hold_is_reported_not_recorded(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A})
+    entered, release, write = _late_writer(runtime, monkeypatch)
+    done = []
+    try:
+        assert runtime.ask_again([A], done=done.append)
+        assert entered.wait(5)
+        _refused_then_held(write, str(tmp_path))
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    assert done == [False]  # never shown as recorded: the newer refusal stands
+    assert is_held(read_state(str(tmp_path)), A)

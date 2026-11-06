@@ -370,13 +370,16 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
             self._post("state", **RUNTIME.view(), saved=saved, recorded=ok)
 
         if targets is None:
-            snapshot = RUNTIME.snapshot
-            if RUNTIME.holds_everything() and snapshot is not None:
-                accepted = RUNTIME.ask_again_all(sorted(snapshot.slots.values()), done=recorded)
+            if RUNTIME.holds_everything():
+                # Everything is held: only the current settings come back, through the bounded release list; every
+                # other refusal stays held, pending or not (H1 fix review F2). Clearing every hold at once would
+                # need its own agreed action.
+                refresh_settings()
+                snapshot = RUNTIME.snapshot
+                targets = sorted(set(snapshot.slots.values())) if snapshot is not None else []
             else:
-                accepted = RUNTIME.ask_again(sorted(RUNTIME.held()), done=recorded)
-        else:
-            accepted = RUNTIME.ask_again(targets, done=recorded)
+                targets = sorted(RUNTIME.held())
+        accepted = RUNTIME.ask_again(targets, done=recorded)
         if not accepted:
             self._post("error", op="ask_again", code="stopping")
 

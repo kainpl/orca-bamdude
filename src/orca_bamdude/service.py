@@ -152,8 +152,10 @@ class StateWriter:
 
     The state file is shared by OrcaSlicer's overlapping processes, so a write waits for the file lock and syncs to
     disk. Neither may happen on the UI thread: ``submit`` queues the change and returns at once, and ``done`` is told
-    whether it was recorded -- an intent is never shown as saved before it is. After the fence nothing new is
-    accepted; what was accepted before it is written by ``drain``.
+    whether it was recorded -- an intent is never shown as saved before it is, nor when the change refused itself
+    (``permits.StaleIntent``). The Runtime closes it together with its own admission; what was accepted before is
+    written by ``drain``. A write that outlives the drain's deadline is judged under the file lock by the epoch its
+    intent carries, so it cannot undo a hold a later load made (H1 fix review F1).
     """
 
     def __init__(self, storage: str | None, name: str = "bamdude-state"):
@@ -176,6 +178,12 @@ class StateWriter:
                 self.thread.start()
             self._wake.notify_all()
             return True
+
+    def close(self) -> None:
+        """Accept nothing more; what was accepted is still written."""
+        with self._lock:
+            self._closed = True
+            self._wake.notify_all()
 
     def adopt(self, storage: str) -> None:
         with self._lock:
@@ -313,6 +321,7 @@ class Runtime:
         with self._lock:
             repeated = self._stopping
             self._stopping = True
+            self.state_writer.close()  # in the same step as admission: no window for a late state request (F1)
             waiters = list(self._waiters)
             steps = sorted(self._steps, key=lambda step: step[0])
         if repeated:
@@ -368,6 +377,7 @@ class Runtime:
         current = effective(base, override_raw, preset_name, override_error)
         slots = slot_targets(base, current)
         state = permits.read_state(self.storage) if self.storage else {}
+        epoch = permits.hold_epoch(state)  # what was held when this was seen (H1 fix review F1)
         with self._lock:
             if self._stopping or revision < self._published:
                 return None
@@ -392,7 +402,7 @@ class Runtime:
             self.snapshot = snapshot
             self._published = revision
             if changed or first:
-                self.state_writer.submit(lambda s: permits.record_observation(s, changed, first))
+                self.state_writer.submit(lambda s: permits.record_observation(s, changed, first, epoch))
         return snapshot
 
     def adopt_storage(self, storage: str) -> None:
@@ -410,13 +420,17 @@ class Runtime:
 
     def ask_again(self, targets, done=None) -> bool:
         """The tab's explicit action: the targets are released and asked for at the next start (§4.1). Returns at
-        once; ``done(recorded)`` follows from the state writer."""
-        targets = list(targets)
-        return self.state_writer.submit(lambda s: permits.ask_again(s, targets), done)
+        once -- ``False`` after the fence; ``done(recorded)`` follows from the state writer.
 
-    def ask_again_all(self, targets, done=None) -> bool:
+        The intent carries the hold epoch it was made at; a load that held something since makes the writer refuse
+        it, and ``done`` hears ``False`` (H1 fix review F1). The read takes no lock.
+        """
         targets = list(targets)
-        return self.state_writer.submit(lambda s: permits.ask_again_all(s, targets), done)
+        epoch = permits.hold_epoch(permits.read_state(self.storage)) if self.storage else 0
+        with self._lock:
+            if self._stopping:
+                return False
+            return self.state_writer.submit(lambda s: permits.ask_again(s, targets, epoch), done)
 
     def flush(self, timeout: float) -> bool:
         return self.state_writer.flush(timeout)

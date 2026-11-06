@@ -24,7 +24,8 @@
   permissions once, at start-up: its own threads, OrcaSlicer's temporary model files, a local camera relay, and the
   farm address you configured. If you answer No, OrcaSlicer turns the plugin off; when you turn it back on, the
   addresses that prompt was about are not asked for again until you ask for them in the tab or change them, so one
-  refusal does not repeat on every start. A printer preset can point the plugin at another address of the farm; the
+  refusal does not repeat on every start; a request in the tab, or a change, made before that refusal cannot bring
+  the address back, and the tab says when a request was not recorded. A printer preset can point the plugin at another address of the farm; the
   API key and proxy headers always come from the tab, never from the preset, because presets are exported and
   shared. OrcaSlicer's own configuration editor never shows the key.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
