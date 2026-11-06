@@ -1,6 +1,8 @@
 """The transport against a real local HTTP server: what is sent, what is refused, what is never followed."""
 
+import socket
 import ssl
+import sys
 import threading
 import time
 from pathlib import Path
@@ -326,30 +328,176 @@ def test_a_stream_already_handed_over_is_its_owners_to_close(serve):
 
 def test_a_closed_transport_does_not_even_connect(serve, monkeypatch):
     server, transport = serve(lambda m, p: _json(200, {}))
-    import http.client
-
     connects = []
-    real = http.client.HTTPConnection.connect
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", lambda self: (connects.append(1), real(self))[1])
+    real = socket.socket.connect
+    monkeypatch.setattr(socket.socket, "connect", lambda self, address: (connects.append(1), real(self, address))[1])
     transport.close()
     with pytest.raises(TransportError):
         transport.request_json("GET", "/api/v1/connector/capabilities")
     assert connects == []
 
 
-def test_a_close_while_connecting_sends_nothing(serve, monkeypatch):
+def test_a_close_before_the_socket_connects_sends_nothing(serve, monkeypatch):
+    # The socket is the transport's from its creation: a close that lands before it connects still owns it.
     server, transport = serve(lambda m, p: _json(200, {}))
-    import http.client
+    real = socket.socket.connect
 
-    real = http.client.HTTPConnection.connect
+    def close_then_connect(self, address):
+        transport.close()
+        return real(self, address)
 
-    def connect_then_closed(self):
-        transport.close()  # the owner's cancel lands before the socket exists: nothing for close() to abort
-        real(self)
-
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", connect_then_closed)
+    monkeypatch.setattr(socket.socket, "connect", close_then_connect)
     with pytest.raises(TransportError) as refused:
         transport.request_json("GET", "/api/v1/connector/capabilities")
     assert refused.value.kind == "cancelled"
     time.sleep(0.2)
     assert server.seen == []
+
+
+def test_the_connection_is_made_by_the_granted_host_name(serve, monkeypatch):
+    # OrcaSlicer matches a socket.connect outside http.client's own frames against its target: the transport connects
+    # by the configured host, never by an address it resolved, so the target stays the host the user granted.
+    server, _ = serve(lambda m, p: _json(200, {}))
+    transport = Transport(Connection.build(f"http://localhost:{server.port}/base", "bd_k"), timeout=5)
+    targets, audited = [], []
+    real = socket.socket.connect
+
+    def connect(self, address):
+        targets.append(address[:2])
+        return real(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    hook_events = {"http.client.connect", "socket.connect"}
+
+    def hook(event, args):
+        if event in hook_events:
+            audited.append((event, args[1][:2] if event == "socket.connect" else (args[1], args[2])))
+
+    sys.addaudithook(hook)
+    try:
+        try:
+            transport.request_json("GET", "/api/v1/connector/capabilities")
+        except TransportError:
+            pass  # the server may listen on IPv4 only; what was asked for is what counts
+    finally:
+        hook_events.clear()  # an audit hook cannot be removed; it goes quiet
+    assert targets and all(address == ("localhost", server.port) for address in targets)
+    assert ("http.client.connect", ("localhost", server.port)) in audited
+    assert all(target == ("localhost", server.port) for event, target in audited if event == "socket.connect")
+
+
+def _raw_server(answer):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    release = threading.Event()
+    started = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+        with conn:
+            started.set()
+            answer(conn, release)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return listener, release, started, thread
+
+
+@pytest.mark.parametrize("connection", ["close", "keep-alive"])
+def test_close_ends_a_body_still_arriving(connection):
+    # After the headers, http.client hands a Connection: close socket to the response and forgets it; the transport
+    # still owns it (H2 fix review F1).
+    def answer(conn, release):
+        conn.recv(16384)
+        head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: "
+        conn.sendall((head + connection + "\r\n\r\n").encode())
+        release.wait(6)
+        try:
+            conn.sendall(b"{}")
+        except OSError:
+            pass
+
+    listener, release, started, thread = _raw_server(answer)
+    port = listener.getsockname()[1]
+    transport = Transport(Connection.build(f"http://127.0.0.1:{port}", "bd_synthetic"), timeout=8)
+    reading, outcome = threading.Event(), {}
+    real = transport._json
+
+    def json_read(response):
+        reading.set()
+        return real(response)
+
+    transport._json = json_read
+
+    def ask():
+        try:
+            outcome["value"] = transport.request_json("GET", "/api/v1/connector/capabilities")
+        except TransportError as exc:
+            outcome["kind"] = exc.kind
+
+    worker = threading.Thread(target=ask)
+    worker.start()
+    try:
+        assert reading.wait(3)
+        transport.close()
+        worker.join(2)
+        alive = worker.is_alive()
+        release.set()
+        worker.join(5)
+        assert not alive and outcome == {"kind": "cancelled"}
+    finally:
+        release.set()
+        worker.join(9)
+        thread.join(9)
+        listener.close()
+
+
+def test_close_ends_a_tls_handshake_in_progress():
+    def answer(conn, release):
+        conn.recv(16384)  # the real ClientHello; no ServerHello comes
+        release.wait(6)
+
+    listener, release, started, thread = _raw_server(answer)
+    port = listener.getsockname()[1]
+    transport = Transport(Connection.build(f"https://127.0.0.1:{port}", "bd_synthetic"), timeout=8)
+    outcome = {}
+
+    def ask():
+        try:
+            transport.request_json("GET", "/api/v1/connector/capabilities")
+        except TransportError as exc:
+            outcome["kind"] = exc.kind
+
+    worker = threading.Thread(target=ask)
+    worker.start()
+    try:
+        assert started.wait(3)
+        time.sleep(0.2)  # inside the handshake
+        transport.close()
+        worker.join(2)
+        alive = worker.is_alive()
+        release.set()
+        worker.join(5)
+        assert not alive and outcome == {"kind": "cancelled"}
+    finally:
+        release.set()
+        worker.join(9)
+        thread.join(9)
+        listener.close()
+
+
+def test_an_answer_read_after_close_is_not_returned(serve, monkeypatch):
+    # A close that lands while the body is already in: the answer was read, but the owner said stop.
+    server, transport = serve(lambda m, p: _json(200, {"late": True}))
+    real = transport._json
+
+    def read_then_closed(response):
+        value = real(response)
+        transport.close()
+        return value
+
+    transport._json = read_then_closed
+    with pytest.raises(TransportError) as refused:
+        transport.request_json("GET", "/api/v1/connector/capabilities")
+    assert refused.value.kind == "cancelled"

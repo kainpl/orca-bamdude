@@ -7,6 +7,13 @@
   protocol error, never shown. An error's text is the server's ``detail.message`` at most -- never a raw body,
   a header, the key or a stack.
 - Every call has a timeout. An upload streams a file in chunks and can be cancelled between chunks.
+- ``close()`` is the owner's cancel (H2 review R3, fix review F1). The transport makes each connection's socket
+  itself and holds it from before it connects to the end of the answer -- the TCP connect, the TLS handshake and the
+  body included, even after http.client hands a ``Connection: close`` socket to the response and forgets it -- so a
+  close ends any of them, and an answer read after it is not returned.
+- It connects by the configured host name, not by an address it resolved, and raises ``http.client.connect`` as
+  http.client does: OrcaSlicer's audit matches a ``socket.connect`` made outside http.client's own frames against its
+  target (rc PluginAuditManager), so the target stays the host the user granted.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ import json
 import os
 import socket
 import ssl
+import sys
 import threading
 from collections.abc import Callable, Iterable
 from urllib.parse import urlencode, urlsplit
@@ -88,21 +96,64 @@ class Transport:
         self._base_path = parts.path
         self._context = _ssl_context(connection.ca_pem) if parts.scheme == "https" else None
         self._lock = threading.Lock()
-        self._live: set[http.client.HTTPConnection] = set()
+        # Each request's connection and the socket it is on now: held from before the socket connects to the end of
+        # the answer, whatever http.client does with its own reference (H2 fix review F1).
+        self._live: dict[http.client.HTTPConnection, socket.socket | None] = {}
         self._closed = False
 
-    # ------------------------------------------------------------------ the owner's cancel (H2 review R3)
+    # ------------------------------------------------------------------ the owner's cancel (H2 review R3, F1)
 
     def close(self) -> None:
-        """End every request in flight and refuse every new one with ``cancelled``: the owner's unload or a new
-        connection generation. A stream already handed to its caller is the caller's to close."""
+        """End every request in flight -- connecting, in its TLS handshake, waiting for or reading its answer -- and
+        refuse every new one with ``cancelled``: the owner's unload or a new connection generation. A stream already
+        handed to its caller is the caller's to close."""
         with self._lock:
             self._closed = True
-            live = list(self._live)
-        for conn in live:
-            sock = conn.sock
-            if sock is not None:
-                _abort(sock)
+            held = [sock for sock in self._live.values() if sock is not None]
+        for sock in held:
+            _abort(sock)
+
+    def _hold(self, conn: http.client.HTTPConnection, sock: socket.socket | None) -> None:
+        """Under the lock: ``sock`` is the one ``close`` ends for ``conn`` now; refused once closed."""
+        with self._lock:
+            if not self._closed:
+                self._live[conn] = sock
+                return
+        if sock is not None:
+            sock.close()
+        raise TransportError("cancelled")
+
+    def _dial(self, conn: http.client.HTTPConnection, tls: bool) -> socket.socket:
+        """The socket of ``conn``, made and held by the transport before it connects (see the module text)."""
+        sys.audit("http.client.connect", conn, conn.host, conn.port)  # what http.client.connect raises
+        families: list[int] = []
+        for family, _kind, _proto, _name, _address in socket.getaddrinfo(conn.host, conn.port, 0, socket.SOCK_STREAM):
+            if family not in families:
+                families.append(family)
+        error: OSError | None = None
+        sock = None
+        for family in families:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            self._hold(conn, sock)
+            try:
+                sock.settimeout(conn.timeout)
+                sock.connect((conn.host, conn.port))  # by name: the audited target is the host the user granted
+                break
+            except OSError as exc:
+                error, sock = exc, None
+                self._hold(conn, None)
+        if sock is None:
+            raise error or OSError("no address")
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        if not tls:
+            return sock
+        secure = self._context.wrap_socket(sock, server_hostname=conn.host, do_handshake_on_connect=False)
+        self._hold(conn, secure)  # the descriptor is the TLS socket's now
+        secure.do_handshake()
+        return secure
 
     @property
     def closed(self) -> bool:
@@ -128,22 +179,26 @@ class Transport:
 
     def _forget(self, conn: http.client.HTTPConnection) -> None:
         with self._lock:
-            self._live.discard(conn)
+            self._live.pop(conn, None)
         conn.close()
+
+    def _done(self, value):
+        """An answer read in full is returned only while the transport is open: after close it is no answer."""
+        if self.closed:
+            raise TransportError("cancelled")
+        return value
 
     # ------------------------------------------------------------------ plumbing
 
     def _open(self, timeout: float | None = None) -> http.client.HTTPConnection:
         if self._scheme == "https":
-            conn = http.client.HTTPSConnection(
-                self._host, self._port, timeout=timeout or self.timeout, context=self._context
-            )
+            conn = _TLSConnection(self, self._host, self._port, timeout or self.timeout, self._context)
         else:
-            conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout or self.timeout)
+            conn = _Connection(self, self._host, self._port, timeout or self.timeout)
         with self._lock:
             if self._closed:
                 raise TransportError("cancelled")
-            self._live.add(conn)
+            self._live[conn] = None
         return conn
 
     def _target(self, path: str, query: dict | Iterable | None) -> str:
@@ -207,7 +262,7 @@ class Transport:
         conn = self._open()
         try:
             response = self._send(conn, method, self._target(path, query), encoded, headers)
-            return self._json(response)
+            return self._done(self._json(response))
         finally:
             self._forget(conn)
 
@@ -253,7 +308,7 @@ class Transport:
                 raise self._failure("timeout") from exc
             except (ConnectionError, OSError, http.client.HTTPException) as exc:
                 raise self._failure("connect") from exc
-            return self._json(response)
+            return self._done(self._json(response))
         finally:
             self._forget(conn)
 
@@ -285,13 +340,35 @@ class Transport:
             self._forget(conn)
             raise
         with self._lock:
-            self._live.discard(conn)  # the stream is its caller's now: closing the transport no longer touches it
+            self._live.pop(conn, None)  # the stream is its caller's now: closing the transport no longer touches it
             closed = self._closed
         stream = Stream(conn, sock, response)
         if closed:
             stream.close()
             raise TransportError("cancelled")
         return stream
+
+
+class _Connection(http.client.HTTPConnection):
+    """An http.client connection whose socket the transport makes and holds (``Transport._dial``)."""
+
+    def __init__(self, transport: Transport, host, port, timeout):
+        super().__init__(host, port, timeout=timeout)
+        self._transport = transport
+
+    def connect(self) -> None:
+        self.sock = self._transport._dial(self, tls=False)
+
+
+class _TLSConnection(http.client.HTTPSConnection):
+    """The TLS one: the handshake runs on a socket the transport already holds."""
+
+    def __init__(self, transport: Transport, host, port, timeout, context):
+        super().__init__(host, port, timeout=timeout, context=context)
+        self._transport = transport
+
+    def connect(self) -> None:
+        self.sock = self._transport._dial(self, tls=True)
 
 
 class Stream:
