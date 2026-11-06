@@ -126,8 +126,10 @@ class Snapshot:
 
     ``connection`` is ``None`` whenever the plugin may not talk to that server now; ``blocked`` says why:
     ``problem`` (a stored or override value does not validate, or the override could not be read), ``missing`` (no
-    address or no key), ``held`` (an unfinished load held the target, §4.1 ⟨R23-B2⟩) or ``needs_restart`` (this load
-    did not ask for it).
+    address or no key), ``state_unreadable`` (the state file exists but cannot be read, so what is held is unknown),
+    ``held`` (an unfinished load held the target, §4.1 ⟨R23-B2⟩) or ``needs_restart`` (this load did not ask for it).
+    A held target stays ``held`` until the state file says otherwise: a change this load saw, or a retry in the tab,
+    gives it a client only once the writer has written the release (H1 fix2 review F1-R).
     """
 
     generation: int
@@ -366,7 +368,9 @@ class Runtime:
 
         Each call takes a revision as it starts; a read that finishes after a newer one was published, or after the
         fence, publishes nothing and returns ``None`` (H1 review R3). Observations are compared with this load's own
-        baseline and handed to the state writer -- no file lock on the caller's thread (R4, R5).
+        baseline and handed to the state writer -- no file lock on the caller's thread (R4, R5). What is held is
+        read from the state file as it is now; a release this observation asks for is published by ``_reconsider``
+        once it is written, never assumed here (H1 fix2 review F1-R).
         """
         with self._lock:
             if self._stopping:
@@ -376,34 +380,60 @@ class Runtime:
         base = parse_base(base_raw)
         current = effective(base, override_raw, preset_name, override_error)
         slots = slot_targets(base, current)
-        state = permits.read_state(self.storage) if self.storage else {}
-        epoch = permits.hold_epoch(state)  # what was held when this was seen (H1 fix review F1)
+        state = permits.load_state(self.storage) if self.storage else {}
+        epoch = permits.hold_epoch(state or {})  # what was held when this was seen (H1 fix review F1)
         with self._lock:
             if self._stopping or revision < self._published:
                 return None
             changed = [t for s, t in sorted(slots.items()) if s in self._seen and self._seen[s] != t]
             first = [t for s, t in sorted(slots.items()) if s not in self._seen]
             self._seen.update(slots)
-            blocked = _blocked(current, state, changed, self.requested)
-            connection = current.connection if blocked is None else None
-            key = (
-                current.source,
-                current.preset_name,
-                current.server_url,
-                current.ca_pem,
-                base.api_key,
-                base.headers,
-                blocked,
-            )
-            if key != self._generation_key:
-                self._generation += 1
-                self._generation_key = key
-            snapshot = Snapshot(self._generation, revision, base, current, connection, blocked, slots)
-            self.snapshot = snapshot
-            self._published = revision
+            snapshot = self._publish(base, current, slots, _blocked(current, state, self.requested), revision)
             if changed or first:
-                self.state_writer.submit(lambda s: permits.record_observation(s, changed, first, epoch))
+                self.state_writer.submit(
+                    lambda s: permits.record_observation(s, changed, first, epoch), self._reconsider
+                )
         return snapshot
+
+    def _publish(self, base: Settings, current: Effective, slots: dict, blocked, revision: int) -> Snapshot:
+        """Under ``self._lock``: the new snapshot. A change of anything that reaches the server, or of the decision,
+        is a new generation."""
+        connection = current.connection if blocked is None else None
+        key = (
+            current.source,
+            current.preset_name,
+            current.server_url,
+            current.ca_pem,
+            base.api_key,
+            base.headers,
+            blocked,
+        )
+        if key != self._generation_key:
+            self._generation += 1
+            self._generation_key = key
+        snapshot = Snapshot(self._generation, revision, base, current, connection, blocked, slots)
+        self.snapshot = snapshot
+        self._published = revision
+        return snapshot
+
+    def _reconsider(self, recorded: bool) -> None:
+        """On the state writer's thread, after this load's own write: decide the published snapshot again from the
+        state file as it is now (H1 fix2 review F1-R). A release the writer refused as stale leaves the target held;
+        a written one gives the same settings a client. Only the snapshot that was judged is replaced -- never a
+        newer one, never after the fence -- and the UI thread waits for none of it."""
+        if not recorded:
+            return
+        with self._lock:
+            snapshot = None if self._stopping else self.snapshot
+        if snapshot is None:
+            return
+        state = permits.load_state(self.storage) if self.storage else {}
+        with self._lock:
+            if self._stopping or self.snapshot is not snapshot:
+                return
+            blocked = _blocked(snapshot.effective, state, self.requested)
+            if blocked != snapshot.blocked:
+                self._publish(snapshot.base, snapshot.effective, snapshot.slots, blocked, snapshot.revision)
 
     def adopt_storage(self, storage: str) -> None:
         """The host's storage folder, taken in ``on_load``, when import could not derive it."""
@@ -427,10 +457,16 @@ class Runtime:
         """
         targets = list(targets)
         epoch = permits.hold_epoch(permits.read_state(self.storage)) if self.storage else 0
+
+        def finished(recorded: bool) -> None:
+            self._reconsider(recorded)  # first, so that what ``done`` shows is already decided
+            if done is not None:
+                done(recorded)
+
         with self._lock:
             if self._stopping:
                 return False
-            return self.state_writer.submit(lambda s: permits.ask_again(s, targets, epoch), done)
+            return self.state_writer.submit(lambda s: permits.ask_again(s, targets, epoch), finished)
 
     def flush(self, timeout: float) -> bool:
         return self.state_writer.flush(timeout)
@@ -460,13 +496,15 @@ class Runtime:
         return out
 
 
-def _blocked(current: Effective, state: dict, changed: list[str], requested) -> str | None:
+def _blocked(current: Effective, state: dict | None, requested) -> str | None:
     if current.problems:
         return "problem"
     if current.connection is None:
         return "missing"
+    if state is None:
+        return "state_unreadable"
     target = f"network:{origin(current.server_url)}"
-    if target not in changed and permits.is_held(state, target):
+    if permits.is_held(state, target):
         return "held"
     if target not in requested:
         return "needs_restart"

@@ -1,12 +1,15 @@
 """Host spec r2.3.2 §4.1, §4.4, §4.5: one Runtime per load -- capability refcount, admission, the fence, the
 snapshot and its generation, the permission targets it may use, and shutdown in its fixed order."""
 
+import sys
 import threading
 import time
 
+import pytest
+
 from orca_bamdude import permits, service
 from orca_bamdude.locking import FileLock
-from orca_bamdude.permits import begin_load, is_held, read_state
+from orca_bamdude.permits import ask_again, begin_load, complete_load, hold_epoch, is_held, read_state
 from orca_bamdude.service import Runtime
 
 KEY = "bd_secret_key_SENTINEL"
@@ -363,3 +366,136 @@ def test_a_retry_formed_before_a_newer_hold_is_reported_not_recorded(tmp_path, m
     assert runtime.flush(5)
     assert done == [False]  # never shown as recorded: the newer refusal stands
     assert is_held(read_state(str(tmp_path)), A)
+
+
+# -- a client for a held target only once its release is written (H1 fix2 review F1-R) ----------------------------
+
+OTHER = "network:https://other.example"
+
+
+def _held_by_another_load(write, folder, target, name):
+    """Another load asks for ``target`` after an explicit retry, is refused, and the next one holds it."""
+    write(folder, lambda s: ask_again(s, [target], hold_epoch(s)))
+    write(folder, lambda s: begin_load(s, name, {target})[0])
+    write(folder, lambda s: begin_load(s, name + "-recovered", set())[0])
+    write(folder, lambda s: complete_load(s, name + "-recovered"))
+
+
+@pytest.mark.parametrize("newer", [A, OTHER], ids=["same-target", "unrelated-target"])
+def test_a_stale_observed_change_leaves_the_held_target_without_a_client(tmp_path, monkeypatch, newer):
+    runtime = make(tmp_path, requested={A, OTHER})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "first")
+    entered, release, write = _late_writer(runtime, monkeypatch)
+    try:
+        snap = runtime.apply_settings(BASE, None, None)  # other -> farm while farm is held
+        assert snap.connection is None and snap.blocked == "held"  # not before the release is written
+        assert entered.wait(5)
+        _held_by_another_load(write, str(tmp_path), newer, "newer")
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    assert is_held(read_state(str(tmp_path)), A)
+    assert runtime.snapshot.connection is None and runtime.snapshot.blocked == "held"
+
+
+def test_a_change_seen_while_held_gives_a_client_once_its_release_is_written(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A, OTHER})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "first")
+    entered, release, _write = _late_writer(runtime, monkeypatch)
+    try:
+        held_snap = runtime.apply_settings(BASE, None, None)
+        assert entered.wait(5)
+        assert runtime.snapshot.connection is None
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    snap = runtime.snapshot
+    assert snap.blocked is None and snap.connection.base_url == "https://farm.example"
+    assert snap.generation == held_snap.generation + 1 and snap.revision == held_snap.revision
+
+
+def test_a_tab_retry_gives_a_client_to_a_target_held_after_this_load_began(tmp_path):
+    runtime = make(tmp_path, requested={A})
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "elsewhere")
+    assert runtime.apply_settings(BASE, None, None).blocked == "held"
+    done = []
+    assert runtime.ask_again([A], done=done.append)
+    assert runtime.flush(5) and done == [True]
+    assert runtime.snapshot.blocked is None and runtime.snapshot.connection is not None
+
+
+def test_a_late_release_is_decided_for_the_newest_settings(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A, OTHER})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "first")
+    entered, release, _write = _late_writer(runtime, monkeypatch)
+    try:
+        runtime.apply_settings(BASE, None, None)
+        assert entered.wait(5)
+        newer = runtime.apply_settings({**BASE, "server_url": "https://farm.example/newer"}, None, None)
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    snap = runtime.snapshot  # the old revision's server never comes back
+    assert snap.revision == newer.revision and snap.effective.server_url == "https://farm.example/newer"
+    assert snap.blocked is None and snap.connection.base_url == "https://farm.example/newer"
+
+
+def test_a_release_decided_while_a_newer_snapshot_lands_publishes_nothing(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A, OTHER})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "first")
+    entered, release, _write = _late_writer(runtime, monkeypatch)
+    original = permits.load_state
+    landed = []
+
+    def newer_lands_first(folder):
+        # The reconsider's own read: a newer snapshot is published between its judgement and its publication.
+        if sys._getframe(1).f_code.co_name == "_reconsider" and not landed:
+            landed.append("in progress")
+            landed.append(runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None))
+        return original(folder)
+
+    try:
+        runtime.apply_settings(BASE, None, None)  # other -> farm while farm is held
+        assert entered.wait(5)
+        monkeypatch.setattr(permits, "load_state", newer_lands_first)
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    assert landed[-1] is not None  # the newer snapshot landed while the older release was being decided
+    assert runtime.snapshot.revision == landed[-1].revision
+    assert runtime.snapshot.effective.server_url == "https://other.example"
+
+
+def test_a_late_release_never_publishes_after_the_fence(tmp_path, monkeypatch):
+    runtime = make(tmp_path, requested={A, OTHER})
+    runtime.apply_settings({**BASE, "server_url": "https://other.example"}, None, None)
+    assert runtime.flush(5)
+    _held_by_another_load(permits.update_state, str(tmp_path), A, "first")
+    entered, release, _write = _late_writer(runtime, monkeypatch)
+    monkeypatch.setattr(service, "STEP_DEADLINE", 0.05)
+    try:
+        held_snap = runtime.apply_settings(BASE, None, None)
+        assert entered.wait(5)
+        runtime.shutdown("unload")
+    finally:
+        release.set()
+    assert runtime.flush(5)
+    assert not is_held(read_state(str(tmp_path)), A)  # the release itself was accepted before the fence
+    assert runtime.snapshot is held_snap and runtime.snapshot.connection is None
+
+
+def test_an_unreadable_state_gives_no_client(tmp_path):
+    # A state that exists but cannot be read is not "nothing held" (H1 fix2 review F1-R: a failed attempt stays
+    # blocked).
+    (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
+    runtime = make(tmp_path, requested={A})
+    snap = runtime.apply_settings(BASE, None, None)
+    assert snap.connection is None and snap.blocked == "state_unreadable"

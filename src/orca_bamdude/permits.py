@@ -162,14 +162,24 @@ def ask_again(state: dict, targets, epoch: int) -> dict:
     return _with_pending(_with_held(state, held(state) - set(targets)), targets)
 
 
-def read_state(folder: str) -> dict:
-    """The state as stored; missing or broken is an empty one."""
+def load_state(folder: str) -> dict | None:
+    """The state for a decision: ``{}`` when there is none yet, ``None`` when it exists but cannot be read or is not
+    an object. A decision that gets ``None`` cannot know what is held and must not assume nothing is (H1 fix2 review
+    F1-R)."""
     try:
         with open(os.path.join(folder, STATE_FILE), encoding="utf-8") as handle:
             state = json.load(handle)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def read_state(folder: str) -> dict:
+    """The state as stored, for a change or a display; missing or broken is an empty one."""
+    state = load_state(folder)
+    return state if state is not None else {}
 
 
 def update_state(folder: str, change, timeout: float = LOCK_TIMEOUT) -> dict:

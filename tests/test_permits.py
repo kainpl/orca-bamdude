@@ -16,6 +16,7 @@ from orca_bamdude.permits import (
     hold_epoch,
     holds_everything,
     is_held,
+    load_state,
     read_state,
     record_observation,
     update_state,
@@ -205,6 +206,17 @@ def test_a_broken_state_is_an_empty_one(tmp_path):
     state, requested, decision = started(junk, "L1", {A})
     assert requested == {A} and decision["previous_load"] is None
     assert held(state) == set()
+
+
+def test_a_decision_tells_a_missing_state_from_an_unreadable_one(tmp_path):
+    folder = str(tmp_path)
+    assert load_state(folder) == {}  # none yet: nothing was ever held
+    (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
+    assert load_state(folder) is None
+    (tmp_path / "state.json").write_text("[1, 2]", encoding="utf-8")
+    assert load_state(folder) is None
+    (tmp_path / "state.json").write_text(json.dumps({"held_targets": [A]}), encoding="utf-8")
+    assert load_state(folder) == {"held_targets": [A]}
 
 
 def test_update_state_is_one_read_change_write_under_the_lock(tmp_path):
