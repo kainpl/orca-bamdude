@@ -42,10 +42,11 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   implies.
 - `permits.py` — which user-set targets a load asks OrcaSlicer for: an unfinished load (a refusal or a stop before
   `on_load`) holds its targets, base included, until the tab asks again or a watched setting changes; a first
-  sighting is never a change. A release carries the hold epoch it was made at and cannot undo a hold a later load
-  made; past `MAX_HELD` everything is held and only what the tab names comes back. A state file that exists but
-  cannot be read is never written over (`StateUnreadable`); only the import repairs it, and says so. `locking.py` —
-  the file lock the journal and the state file share.
+  sighting is never a change. A release carries the state's incarnation and hold epoch from when it was made
+  (`intent_basis`) and cannot undo a hold a later load made, in this state or in one started again since; past
+  `MAX_HELD` everything is held and only what the tab names comes back. A state file that exists but cannot be read
+  is never written over (`StateUnreadable`); only the import repairs it, as a new incarnation, and says so.
+  `locking.py` — the file lock the journal and the state file share.
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
