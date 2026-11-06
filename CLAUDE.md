@@ -42,7 +42,9 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   implies.
 - `permits.py` — which user-set targets a load asks OrcaSlicer for: an unfinished load (a refusal or a stop before
   `on_load`) holds its targets, base included, until the tab asks again or a watched setting changes; a first
-  sighting is never a change. `locking.py` — the file lock the journal and the state file share.
+  sighting is never a change. A release carries the hold epoch it was made at and cannot undo a hold a later load
+  made; past `MAX_HELD` everything is held and only what the tab names comes back. `locking.py` — the file lock the
+  journal and the state file share.
 - `transport.py` — HTTP to the one configured server (JSON requests, streamed upload, camera stream).
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
@@ -55,8 +57,9 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `service.py` — one `Runtime` per load (capability refcount, admission before the fence, shutdown steps with
   deadlines, settings snapshots by revision and generation), its `LoadContext` fence that every callback handed to
   OrcaSlicer checks, the `Notifier` — the only caller of the blocking `push_notification`, never waited for at
-  shutdown — and the `StateWriter`, the one thread that writes `state.json`. Shutdown cleans up only after every
-  owner is known to have finished; the UI thread never waits for the state file's lock.
+  shutdown — and the `StateWriter`, the one thread that writes `state.json`, closed in the same step as admission.
+  Shutdown cleans up only after every owner is known to have finished; the UI thread never waits for the state
+  file's lock.
 - `orca_adapter.py` — the only module that imports `orca`: install facts, the one permission request, the
   `BamDudePrinter` agent and the `BamDude` tab. `__init__.py` imports it only where `orca` exists. The live preset
   bundle is read on the UI thread only (`on_load` runs on OrcaSlicer's load thread); an override that cannot be
