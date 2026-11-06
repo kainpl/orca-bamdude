@@ -38,6 +38,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 
+from . import locking
 from .locking import FileLock
 
 PHASES = ("prepared", "uploading", "uploaded", "submitting", "accepted", "unknown", "finished", "upload_only")
@@ -61,8 +62,7 @@ class JournalError(ValueError):
 def _read_durable(path: str) -> dict | None:
     """The record as it is on disk now; ``None`` when there is none. A file that does not parse is never replaced."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
+        payload = json.loads(locking.read_text(path))  # a sharing violation is no damage: it is waited out
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
@@ -83,7 +83,7 @@ def _write_atomic(path: str, payload: dict) -> None:
         json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(partial, path)
+    locking.replace(partial, path)  # a lockless reader holding the record open is waited out
 
 
 @dataclass
@@ -171,8 +171,7 @@ def _serialised(record: Record) -> str:
 
 def _read_namespace(folder: str) -> tuple[str, str, str] | None:
     try:
-        with open(os.path.join(folder, NAMESPACE_FILE), encoding="utf-8") as handle:
-            value = json.load(handle)
+        value = json.loads(locking.read_text(os.path.join(folder, NAMESPACE_FILE)))
     except (OSError, ValueError):
         return None  # a folder of the first format, or a damaged file: the namespace is not known
     parts = value.get("namespace") if isinstance(value, dict) else None
@@ -212,8 +211,7 @@ def _read_folder(folder: str) -> list[Record]:
         if not name.endswith(".json") or name == NAMESPACE_FILE:
             continue
         try:
-            with open(os.path.join(folder, name), encoding="utf-8") as handle:
-                found.append(_record(json.load(handle), folder))
+            found.append(_record(json.loads(locking.read_text(os.path.join(folder, name))), folder))
         except (OSError, ValueError, TypeError):
             continue  # a damaged record is skipped, never rewritten
     return sorted(found, key=lambda r: r.created_at, reverse=True)
@@ -324,8 +322,7 @@ class Journal:
 
     def load(self, operation_id: str) -> Record | None:
         try:
-            with open(self._path(operation_id), encoding="utf-8") as handle:
-                return _record(json.load(handle), self.folder)
+            return _record(json.loads(locking.read_text(self._path(operation_id))), self.folder)
         except FileNotFoundError:
             return None
 

@@ -14,6 +14,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from . import locking
+
 CHUNK = 1024 * 1024
 
 
@@ -80,7 +82,7 @@ def stage(
             raise StagingError("source_changed")
         sha = digest.hexdigest()
         final = os.path.join(staging_dir, f"{sha}.3mf")
-        os.replace(partial, final)
+        locking.replace(partial, final)  # a reader of the same bytes' copy holding it open is waited out
     except StagingError:
         _remove(partial)
         raise

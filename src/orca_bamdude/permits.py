@@ -42,6 +42,7 @@ import json
 import os
 import secrets
 
+from . import locking
 from .locking import FileLock
 
 STATE_FILE = "state.json"
@@ -196,8 +197,9 @@ def load_state(folder: str) -> dict | None:
     an object. A decision that gets ``None`` cannot know what is held and must not assume nothing is (H1 fix2 review
     F1-R)."""
     try:
-        with open(os.path.join(folder, STATE_FILE), encoding="utf-8") as handle:
-            state = json.load(handle)
+        # A sharing violation while another thread or process replaces the file is waited out, not taken for an
+        # unreadable state (H2: measured on Windows beside a writer).
+        state = json.loads(locking.read_text(os.path.join(folder, STATE_FILE)))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):
@@ -235,7 +237,7 @@ def update_state(folder: str, change, timeout: float = LOCK_TIMEOUT, repair: boo
                 json.dump(state, handle, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, path)
+            locking.replace(temp, path)  # a lockless reader holding the file open is waited out
         except BaseException:
             try:
                 os.remove(temp)

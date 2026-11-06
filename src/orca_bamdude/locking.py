@@ -45,6 +45,36 @@ else:
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 
+# A file that a lockless reader has open cannot be replaced on Windows, and opening one while it is replaced can fail
+# the same way: both raise PermissionError for as long as the other side holds it -- microseconds for a JSON read or
+# a rename. Each is waited out for a bounded time; one that persists is raised as it was. Reads are bounded tighter:
+# the UI thread reads the state file.
+READ_RETRY = (0.002, 0.005, 0.01, 0.02, 0.04)
+REPLACE_RETRY = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4)
+
+
+def read_text(path: str) -> str:
+    """The file's text; a sharing violation is retried, a missing file raises FileNotFoundError at once."""
+    for delay in READ_RETRY:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.read()
+        except PermissionError:
+            time.sleep(delay)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def replace(src: str, dst: str) -> None:
+    """``os.replace`` that waits out a reader holding ``dst`` open."""
+    for delay in REPLACE_RETRY:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(src, dst)
+
 
 class LockBusy(Exception):
     """Another writer held the lock past the timeout."""
