@@ -381,7 +381,7 @@ class Runtime:
         current = effective(base, override_raw, preset_name, override_error)
         slots = slot_targets(base, current)
         state = permits.load_state(self.storage) if self.storage else {}
-        epoch = permits.hold_epoch(state or {})  # what was held when this was seen (H1 fix review F1)
+        basis = permits.intent_basis(state or {})  # what was held when this was seen (H1 fix review F1, F1-R3)
         with self._lock:
             if self._stopping or revision < self._published:
                 return None
@@ -391,7 +391,7 @@ class Runtime:
             snapshot = self._publish(base, current, slots, _blocked(current, state, self.requested), revision)
             if changed or first:
                 self.state_writer.submit(
-                    lambda s: permits.record_observation(s, changed, first, epoch), self._reconsider
+                    lambda s: permits.record_observation(s, changed, first, basis), self._reconsider
                 )
         return snapshot
 
@@ -456,7 +456,7 @@ class Runtime:
         it, and ``done`` hears ``False`` (H1 fix review F1). The read takes no lock.
         """
         targets = list(targets)
-        epoch = permits.hold_epoch(permits.read_state(self.storage)) if self.storage else 0
+        basis = permits.intent_basis(permits.read_state(self.storage) if self.storage else {})
 
         def finished(recorded: bool) -> None:
             self._reconsider(recorded)  # first, so that what ``done`` shows is already decided
@@ -466,7 +466,7 @@ class Runtime:
         with self._lock:
             if self._stopping:
                 return False
-            return self.state_writer.submit(lambda s: permits.ask_again(s, targets, epoch), finished)
+            return self.state_writer.submit(lambda s: permits.ask_again(s, targets, basis), finished)
 
     def flush(self, timeout: float) -> bool:
         return self.state_writer.flush(timeout)

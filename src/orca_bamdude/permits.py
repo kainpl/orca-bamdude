@@ -20,6 +20,11 @@ refused again on every start. So:
   A retry formed before a newer hold is refused whole (``StaleIntent``); an observed change formed before it counts
   only as a first sighting. One number, not one per target: a release that races a restart is rare, and losing it
   costs one click in the tab.
+- **The incarnation** (H1 fix4 review F1-R3). The epoch counts within one state. A state that starts again -- the
+  file was missing, or the import repaired an unreadable one -- gets a fresh random ``incarnation`` at its first
+  load, and its epoch starts again from 0. A release carries both (``intent_basis``): one formed in another
+  incarnation is stale whatever its epoch, so an intent from before a repair cannot reuse the new state's numbers
+  and undo a refusal made after it. Within one incarnation the epoch only grows.
 - **Pending.** The last few targets seen or asked for again, so a preset switch within a session finds its origin
   already granted.
 
@@ -35,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 
 from .locking import FileLock
 
@@ -77,6 +83,21 @@ def hold_epoch(state: dict) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def incarnation(state: dict) -> str | None:
+    value = state.get("incarnation")
+    return value if isinstance(value, str) and value else None
+
+
+def intent_basis(state: dict) -> tuple[str | None, int]:
+    """What a release carries from the moment it was formed: the state's incarnation and hold epoch."""
+    return incarnation(state), hold_epoch(state)
+
+
+def _stale(state: dict, basis) -> bool:
+    formed_in, epoch = basis
+    return incarnation(state) != formed_in or hold_epoch(state) > epoch
+
+
 def holds_everything(state: dict) -> bool:
     return state.get("held_all") is True
 
@@ -114,6 +135,8 @@ def begin_load(state: dict, load_id: str, current: set[str]) -> tuple[dict, set[
     Returns the new state (with this load's marker), the user targets to ask for, and what was decided -- for the
     tab's explanation.
     """
+    if incarnation(state) is None:  # a new, repaired or legacy state starts an incarnation of its own
+        state = {**state, "incarnation": secrets.token_hex(16)}
     marker = state.get("load_marker")
     previous = None
     held_now: list[str] = []
@@ -140,7 +163,7 @@ def complete_load(state: dict, load_id: str) -> dict:
     return {**state, "load_marker": {**marker, "completed": True}}
 
 
-def record_observation(state: dict, changed, first, epoch: int) -> dict:
+def record_observation(state: dict, changed, first, basis) -> dict:
     """What one Runtime saw (H1 review R5): ``changed`` are targets of settings it saw change during its own load --
     released from any hold and queued; ``first`` are its first sightings -- queued unless held, never released.
 
@@ -150,7 +173,7 @@ def record_observation(state: dict, changed, first, epoch: int) -> dict:
     newer hold, is only a first sighting (H1 fix review F1).
     """
     changed = [t for t in changed if isinstance(t, str)]
-    if hold_epoch(state) > epoch:
+    if _stale(state, basis):
         changed, first = [], changed + list(first)
     state = _released(state, changed)
     state = _with_held(state, held(state) - set(changed)) if changed else state
@@ -158,10 +181,10 @@ def record_observation(state: dict, changed, first, epoch: int) -> dict:
     return _with_pending(state, queued) if queued else state
 
 
-def ask_again(state: dict, targets, epoch: int) -> dict:
+def ask_again(state: dict, targets, basis) -> dict:
     """An explicit action in the tab, made at ``epoch``: release these targets and queue them for the next load.
     Raises ``StaleIntent`` when a load held something after it was made (H1 fix review F1)."""
-    if hold_epoch(state) > epoch:
+    if _stale(state, basis):
         raise StaleIntent
     targets = [t for t in targets if isinstance(t, str)]
     state = _released(state, targets)

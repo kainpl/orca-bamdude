@@ -14,6 +14,7 @@ from orca_bamdude.permits import (
     begin_load,
     complete_load,
     hold_epoch,
+    intent_basis,
     is_held,
     load_state,
     read_state,
@@ -363,6 +364,8 @@ def test_a_late_write_of_an_old_load_cannot_undo_a_newer_refusal(tmp_path, monke
 
 def test_a_retry_formed_before_a_newer_hold_is_reported_not_recorded(tmp_path, monkeypatch):
     runtime = make(tmp_path, requested={A})
+    permits.update_state(str(tmp_path), lambda s: begin_load(s, "L0", set())[0])  # one incarnation throughout:
+    permits.update_state(str(tmp_path), lambda s: complete_load(s, "L0"))  # only the epoch tells this retry stale
     entered, release, write = _late_writer(runtime, monkeypatch)
     done = []
     try:
@@ -383,7 +386,7 @@ OTHER = "network:https://other.example"
 
 def _held_by_another_load(write, folder, target, name):
     """Another load asks for ``target`` after an explicit retry, is refused, and the next one holds it."""
-    write(folder, lambda s: ask_again(s, [target], hold_epoch(s)))
+    write(folder, lambda s: ask_again(s, [target], intent_basis(s)))
     write(folder, lambda s: begin_load(s, name, {target})[0])
     write(folder, lambda s: begin_load(s, name + "-recovered", set())[0])
     write(folder, lambda s: complete_load(s, name + "-recovered"))
@@ -559,3 +562,25 @@ def test_on_load_over_an_unreadable_state_writes_nothing_and_does_not_raise(tmp_
     (tmp_path / "state.json").write_text("{not json", encoding="utf-8")
     assert runtime.loaded() is False
     assert (tmp_path / "state.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_tab_retry_formed_before_a_repair_is_not_recorded_over_the_newer_refusal(tmp_path, monkeypatch):
+    # H1 fix4 review F1-R3: the repair starts a new incarnation, so an older intent cannot reuse its epoch numbers.
+    runtime = make(tmp_path, requested={A})
+    history = "network:https://history.example"
+    permits.update_state(str(tmp_path), lambda s: begin_load(s, "L1", {history})[0])
+    permits.update_state(str(tmp_path), lambda s: begin_load(s, "L2", set())[0])  # L1 refused: epoch 1
+    permits.update_state(str(tmp_path), lambda s: complete_load(s, "L2"))
+    assert hold_epoch(read_state(str(tmp_path))) == 1
+    entered, release, write = _late_writer(runtime, monkeypatch)
+    done = []
+    try:
+        assert runtime.ask_again([A], done=done.append)
+        assert entered.wait(5)
+        (tmp_path / "state.json").write_text("{broken", encoding="utf-8")
+        write(str(tmp_path), lambda s: begin_load(s, "repaired", {A})[0], repair=True)
+        _refused_then_held(write, str(tmp_path))
+    finally:
+        release.set()
+    assert runtime.flush(5) and done == [False]
+    assert is_held(read_state(str(tmp_path)), A)
