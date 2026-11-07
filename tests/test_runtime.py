@@ -636,3 +636,37 @@ def test_a_tab_retry_formed_before_a_repair_is_not_recorded_over_the_newer_refus
         release.set()
     assert runtime.flush(5) and done == [False]
     assert is_held(read_state(str(tmp_path)), A)
+
+
+# -- after a restart the journal's open records are asked about, GETs only (spec r2 §7) -----------------------------
+
+
+def test_the_runtime_reconciles_a_namespaces_open_records_once_it_reads_its_list(tmp_path):
+    import time as _time
+
+    from orca_bamdude.api import Capabilities
+    from orca_bamdude.journal import Journal
+
+    caps = Capabilities("srv", "ep", "key", "0.8.0", True, {}, {})
+    journal = Journal(str(tmp_path), caps.namespace)
+    record = journal.create("part.gcode.3mf", "a" * 64, origin="native")
+
+    def unknown(stored):
+        stored.phase, stored.body = "unknown", {"operation_id": record.operation_id}
+
+    journal.update(record.operation_id, unknown)
+    pushed, calls = [], []
+
+    class Client:
+        def get(self, operation_id, server_id, epoch):
+            calls.append(("get", operation_id))
+            return 200, {"state": "complete", "entries": []}
+
+    runtime = Runtime(lambda *a: pushed.append(a), str(tmp_path), "L", requested=set(), decision={})
+    runtime.fleet.on_namespace(Client(), caps)
+    deadline = _time.monotonic() + 3
+    while not pushed and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert calls == [("get", record.operation_id)]
+    assert journal.load(record.operation_id).phase == "accepted"
+    assert pushed and pushed[0][0] == "Regular" and "part.gcode.3mf" in pushed[0][1]

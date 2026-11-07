@@ -187,6 +187,10 @@ class Fleet:
         self._status_at: float | None = None
         self._firmware: str | None = None
         self._camera: Target | None = None  # the camera target this fleet admitted, for ``_target``
+        self._namespaces_seen: set = set()
+        # Called (outside every lock, on the poll thread) the first time this load reads a namespace's list: the
+        # Runtime reconciles that namespace's journal from there (spec r2 §7).
+        self.on_namespace: Callable | None = None
         self._last_push = 0.0
         self._seq = 0
         self._access_code = ""
@@ -499,12 +503,16 @@ class Fleet:
         self.poller.want("printers", printers)
         self.poller.want("status", status)
 
-    def _learn(self, capabilities: Capabilities) -> None:
-        """Under the lock: the newest capabilities, and the server's polling floor with them."""
+    def _learn(self, capabilities: Capabilities) -> bool:
+        """Under the lock: the newest capabilities, and the server's polling floor with them. ``True`` the first time
+        this load sees their namespace."""
         self._capabilities = capabilities
+        first = capabilities.namespace not in self._namespaces_seen
+        self._namespaces_seen.add(capabilities.namespace)
         floor = capabilities.limits.get("poll_min_seconds") if isinstance(capabilities.limits, dict) else None
         if isinstance(floor, (int, float)) and not isinstance(floor, bool) and floor > 0:
             self.poller.limit(poll_min_seconds=floor)
+        return first
 
     # -- reads ---------------------------------------------------------------------------------------------------------
 
@@ -537,7 +545,7 @@ class Fleet:
                     return  # an answer about a connection, or a namespace, that is no longer this one
                 binding = Binding.of(read.base_url, capabilities)
                 renamed = self._namespace_changed_locked(binding)  # a restore seen by the list first (F2)
-                self._learn(capabilities)
+                learnt = self._client if self._learn(capabilities) else None
                 self._map = device_map(binding, printers)
                 self._list_once = False
                 announce = self._map.announced()
@@ -570,6 +578,11 @@ class Fleet:
         self._update_wants()
         if wake:
             self.poller.wake("status")
+        if learnt is not None and self.on_namespace is not None:
+            try:
+                self.on_namespace(learnt, capabilities)  # the list is read first on every connection
+            except Exception:  # noqa: BLE001 -- the history's own business; the fleet goes on
+                pass
 
     def _fetch_status(self):
         read, client = self._started(self.target)

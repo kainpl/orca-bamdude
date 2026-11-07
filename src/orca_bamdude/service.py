@@ -10,10 +10,11 @@ import collections
 import threading
 from dataclasses import dataclass, field
 
-from . import i18n, permits
+from . import i18n, permits, recovery
 from .camera_relay import CameraRelay
 from .config import Connection
 from .fleet import Fleet, HostCallbacks
+from .journal import Journal
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
 from .submit import UploadGate
 
@@ -279,7 +280,41 @@ class Runtime:
             admits=lambda target: self.fleet.camera_admits(target),  # asked at every request, open and renewal
         )
         self.fleet = Fleet(self.callbacks, self.context, self.say, relay=self.relay)
+        self.fleet.on_namespace = self._reconcile_namespace
         self._fleet_started = False
+
+    # -- the journal after a restart (spec r2 §7) -------------------------------------------------------------------
+
+    def _reconcile_namespace(self, client, capabilities) -> None:
+        """The first time this load reads a namespace's list: its journal's open records are asked about -- GETs
+        only, nothing sent -- on a thread of its own, admitted like any operation so shutdown accounts for it."""
+        storage = self.storage
+        token = self.admit("reconcile") if storage is not None else None
+        if token is None:
+            return
+
+        def run():
+            try:
+                outcomes = recovery.reconcile_pending(Journal(storage, capabilities.namespace), client, capabilities)
+                for record, outcome in outcomes:
+                    self._announce_reconciled(record.filename, outcome)
+            except Exception:  # noqa: BLE001 -- the records stay open; the history asks again
+                pass
+            finally:
+                self.release(token)
+
+        threading.Thread(target=run, name="bamdude-reconcile", daemon=True).start()
+
+    def _announce_reconciled(self, name: str, outcome) -> None:
+        if outcome.result == "accepted":
+            level, text = "Regular", self.say("send.confirmed")
+        elif outcome.code == "not_received":
+            level, text = "Warning", self.say("send.not_received")
+        elif outcome.result in ("refused", "cancelled") and outcome.code in recovery.FINAL_CODES:
+            level, text = "Warning", self.say("send.refused").replace("{reason}", self.say(f"reason.{outcome.code}"))
+        else:
+            return  # still unknown: it was said so when it happened
+        self.notify(level, text.replace("{file}", name))
 
     # -- capabilities and shutdown ---------------------------------------------------------------------------------
 

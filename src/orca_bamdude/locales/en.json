@@ -63,7 +63,9 @@
     "partial": "BamDude queued only part of {file}. Open BamDude to see what was refused.",
     "unknown": "BamDude has not confirmed {file} yet. The plugin will check again; do not send it twice.",
     "cancelled": "Sending {file} was cancelled. Nothing new was queued.",
-    "refused": "BamDude did not take {file}: {reason}"
+    "refused": "BamDude did not take {file}: {reason}",
+    "confirmed": "BamDude confirmed {file}: it is in the queue.",
+    "not_received": "BamDude never received {file}, so nothing was queued. The BamDude tab's history can send it again."
   },
   "reason": {
     "generic": "the request was refused ({code}).",
@@ -93,6 +95,14 @@
     "protocol": "the server's answer was not understood.",
     "rejected": "BamDude refused every plate. Open BamDude to see why.",
     "journal_busy": "the plugin's history is busy (another OrcaSlicer window may be closing). Try again in a moment.",
-    "journal": "the plugin could not write its history, so nothing was sent."
+    "journal": "the plugin could not write its history, so nothing was sent.",
+    "context_changed": "the server's records belong to another connection now.",
+    "receipt_compacted": "the result is too old to be read again.",
+    "not_received": "the server never received the request.",
+    "foreign_namespace": "this record belongs to an earlier server or key and is never sent again.",
+    "nothing_to_resume": "there is nothing to go on with.",
+    "nothing_to_send": "there is nothing to send again.",
+    "confirm": "sending again needs your confirmation.",
+    "operation_not_found": "the server no longer knows this send."
   }
 }
