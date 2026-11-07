@@ -113,6 +113,12 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `exports.py` — the export folder (§8.4): a bounded listing (plain `.3mf`, no link, junction or reparse point) and
   one-time tokens bound to generation, folder, path, size and time; a path from the page is never taken. The tab's
   entry points are `orca_adapter.list_exports` / `manual_send`.
+- `tracking.py` — following what was sent (§9.2-§9.4): milestones only from the server's observation projection
+  (§11 S3), each said once -- deduplicated in the operation's journal record by S3's job / assignment / execution
+  identities, so a restart repeats nothing. Its errors are classified before the poll scheduler sees them: addressed
+  to one operation end only it, global ones pause tracking once ("Follow again" or new settings resume it),
+  temporary ones back off that operation. Only a completed or unavailable job ends following; a day at most. The
+  Runtime's `tracked` channel runs it; `Runtime.track()` wants and wakes it.
 - `tab.py` — the tab's own logic (§8): `Lease` (live monitoring: off at every load, ten minutes renewed only by the
   person's actions, a minimised window pauses it), `check_connection` (the stepwise check), `fleet_rows` /
   `history_rows` (what the page is told, field by field -- never a key, hash, body or address).

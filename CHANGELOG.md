@@ -67,5 +67,11 @@
   its actions (check, go on, cancel what has not started, send as new after a confirmation) and Open BamDude are
   there too. In a printer preset's Capabilities the agent's own page edits that preset's address and CA only, with
   "Restore to global"; the key and the proxy headers always come from the tab.
+- What you sent is followed for a day while OrcaSlicer is open: a notification when it is in the queue, when BamDude
+  chooses a printer for an AutoQueue job, when it starts, when the first layer is done, and when it finishes, fails
+  or is cancelled -- each once, also after a restart, and a print run again counts as a new run. When BamDude can no
+  longer follow a job (moved to another queue, its printer outside the key's printers, the server restored), you are
+  told once; when the key loses its rights or the connector is switched off, following pauses with an explanation
+  and the tab's "Follow again". The history shows each send's last milestone.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.
