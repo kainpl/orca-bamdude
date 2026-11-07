@@ -37,6 +37,7 @@ in BamDude's web interface.
 - **OrcaSlicer 2.5.0-rc**, with *Preferences → Developer → Use printer agents instead of print hosts* enabled.
   Sending is enabled for this version only; on another one the plugin still monitors and shows the camera, and the
   tab says why it does not send. Earlier OrcaSlicer releases have no plugins at all; use the Virtual Printer there.
+  The plugin has been tried in OrcaSlicer on Windows 11; on Linux and macOS only its tests have run, not OrcaSlicer.
 - **A BamDude server with the slicer connector** (`/api/v1/connector/`) — the first BamDude release that has it.
 - **A BamDude API key** for the plugin. What the plugin can do follows the key's rights: `printers:read` for the
   device list, `camera:view` for the camera, `library:upload` + `library:read_all` to put files in the library,

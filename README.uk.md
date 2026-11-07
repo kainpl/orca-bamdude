@@ -34,6 +34,7 @@ BamDude приймає друк і через Віртуальний принт�
 - **OrcaSlicer 2.5.0-rc** з увімкненим *Preferences → Developer → Use printer agents instead of print hosts*.
   Надсилання ввімкнене лише для цієї версії; на іншій плагін показує стан і камеру, а вкладка пояснює, чому не
   надсилає. Раніші випуски OrcaSlicer плагінів не мають зовсім — там користуйтеся Віртуальним принтером.
+  В OrcaSlicer плагін перевірено на Windows 11; на Linux і macOS проходили лише його тести, без OrcaSlicer.
 - **Сервер BamDude із з'єднувачем для слайсера** (`/api/v1/connector/`) — перший випуск BamDude, у якому він є.
 - **API-ключ BamDude** для плагіна. Що плагін може, залежить від прав ключа: `printers:read` для списку пристроїв,
   `camera:view` для камери, `library:upload` + `library:read_all`, щоб класти файли в бібліотеку, `queue:create` +
