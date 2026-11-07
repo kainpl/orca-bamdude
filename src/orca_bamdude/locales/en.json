@@ -103,6 +103,18 @@
     "nothing_to_resume": "there is nothing to go on with.",
     "nothing_to_send": "there is nothing to send again.",
     "confirm": "sending again needs your confirmation.",
-    "operation_not_found": "the server no longer knows this send."
+    "operation_not_found": "the server no longer knows this send.",
+    "setup": "BamDude has no usable connection. Open the BamDude tab to check its settings.",
+    "export_token_unknown": "the file list is out of date. Refresh it and choose the file again.",
+    "export_token_used": "this file was already sent from the list. Refresh it to send again.",
+    "export_token_expired": "the file list is out of date. Refresh it and choose the file again.",
+    "export_token_stale": "the connection or the export folder changed. Refresh the list.",
+    "export_missing": "the file is gone from the export folder.",
+    "export_not_a_file": "the export folder holds a link or something other than a file there.",
+    "export_outside_root": "the file leads outside the export folder and is not sent.",
+    "export_changed": "the file changed after it was listed. Refresh the list."
+  },
+  "export": {
+    "file": "the file"
   }
 }

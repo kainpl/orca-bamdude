@@ -470,6 +470,14 @@ class Fleet:
                 return "foreign"
             return self._target, self._client, self._capabilities, dict(self._status or {})
 
+    def send_context(self):
+        """What a send from the tab goes with: this generation's client, its capabilities and the settings snapshot
+        (its export folder, its generation) -- or ``None`` while there is no connection."""
+        with self._lock:
+            if self._client is None or self._capabilities is None or self._snapshot is None:
+                return None
+            return self._client, self._capabilities, self._snapshot
+
     # -- state ---------------------------------------------------------------------------------------------------------
 
     @property

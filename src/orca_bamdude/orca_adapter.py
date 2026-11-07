@@ -20,7 +20,7 @@ from pathlib import PurePath
 
 import orca
 
-from . import __version__, choice_window, jobs, locking, permits, submit
+from . import __version__, choice_window, exports, jobs, locking, permits, submit
 from .config import ConfigError
 from .journal import Journal
 from .service import Runtime
@@ -282,6 +282,69 @@ def send_job(kind: str, params, update_fn, cancel_fn) -> int:
             RUNTIME.release(token)
 
     return jobs.run_for_host(jobs.Job(work), update_fn, cancel_fn, RUNTIME.say)
+
+
+def list_exports() -> list:
+    """The export folder's plates with their one-time tokens (spec r2 §8.4). It reads the folder: a plugin thread's
+    call, never the UI thread's."""
+    context = RUNTIME.fleet.send_context()
+    if context is None:
+        return []
+    snapshot = context[2]
+    root = snapshot.base.export_dir
+    return RUNTIME.exports.list(root, generation=snapshot.generation) if root else []
+
+
+def manual_send(token: str, target: submit.Target, target_name: str) -> bool:
+    """The tab's send of one export-folder file (spec r2 §8.4), from the UI thread: it decides what is known now and
+    returns at once; the token, the copy, the window and the farm are a plugin thread's."""
+    context = RUNTIME.fleet.send_context()
+    if context is None:
+        announce(submit.Outcome("refused", "setup"), "", target_name)
+        return False
+    client, capabilities, snapshot = context
+    root, storage = snapshot.base.export_dir or "", RUNTIME.storage
+    admitted = RUNTIME.admit("send")
+    if admitted is None:
+        return False
+
+    def work(cancel, report):
+        name = ""
+        try:
+            try:
+                path = RUNTIME.exports.resolve(token, root, snapshot.generation)
+            except exports.ExportError as exc:
+                name = os.path.basename(exc.relative or "")
+                outcome = submit.Outcome("refused", f"export_{exc.code}")
+            else:
+                name = os.path.basename(path)
+                outcome = submit.send(
+                    submit.Request.manual(path, name, target),
+                    client=client,
+                    capabilities=capabilities,
+                    journal=Journal(storage, capabilities.namespace),
+                    staging_dir=os.path.join(storage, "staging"),
+                    gate=RUNTIME.upload_gate,
+                    cancel=cancel,
+                    choose=lambda offer: choice_window.ask(
+                        offer,
+                        orca.host.ui.create_window,
+                        orca.host.ui.WINDOW_MODAL,
+                        RUNTIME,
+                        RUNTIME.say,
+                        cancel,
+                        target_name=target_name,
+                    ),  # fmt: skip
+                    host_writable=RUNTIME.host_writable,
+                    progress=report,
+                )
+            announce(outcome, name or RUNTIME.say("export.file"), target_name)
+            return outcome
+        finally:
+            RUNTIME.release(admitted)
+
+    jobs.Job(work, name="bamdude-manual-send").start()
+    return True
 
 
 def _ui_entry():

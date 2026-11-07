@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from . import i18n, permits, recovery
 from .camera_relay import CameraRelay
 from .config import Connection
+from .exports import Exports
 from .fleet import Fleet, HostCallbacks
 from .journal import Journal
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
@@ -274,6 +275,7 @@ class Runtime:
         self.language = "en"
         self.host_writable = False  # until the UI thread has read OrcaSlicer's version
         self.upload_gate = UploadGate()  # one upload at a time for the whole plugin (§6.2 step 3)
+        self.exports = Exports()  # the export folder's one-time tokens (§8.4)
         self.callbacks = HostCallbacks()
         self.relay = CameraRelay(
             lambda target: self.fleet.open_camera(target),

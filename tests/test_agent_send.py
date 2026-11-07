@@ -4,6 +4,7 @@ connection, and the notification that says where the file went."""
 
 import hashlib
 import json
+import sys
 import threading
 import time
 import zipfile
@@ -193,3 +194,41 @@ def test_slots_the_printer_does_not_show_are_not_kept_and_the_window_says_so(hos
     thread.join(10)
     assert result["code"] == -18  # a closed window is a cancel: nothing was sent
     assert farm.requests("/connector/files") == []
+
+
+# -- the tab's send from the export folder (spec r2 §8.4) -------------------------------------------------------------
+
+
+def test_a_file_of_the_export_folder_is_sent_by_its_token(tmp_path, farm):
+    from orca_bamdude.submit import Target
+
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    with open(_project(tmp_path, (1,)), "rb") as handle:
+        (exports / "bracket.gcode.3mf").write_bytes(handle.read())
+    host = Host(tmp_path / "data2")
+    host.install()
+    host.write_base(
+        AGENT, {"server_url": farm.server.url + "/base", "api_key": "bd_test_key", "export_dir": str(exports)}
+    )
+    try:
+        connected(host)
+        adapter = sys.modules["orca_bamdude.orca_adapter"]
+        (item,) = adapter.list_exports()
+        assert item.relative == "bracket.gcode.3mf" and str(exports) not in item.token
+        started = host.ui.call(lambda: adapter.manual_send(item.token, Target.printer(1, IDENTITY), "X1C left"))
+        assert started is True
+        assert wait_for(lambda: host.windows and host.windows[0]["open"])
+        assert 'value="library_only" checked' in host.windows[0]["html"]
+        host.window_submit(0, {"action": "queue_manual", "plates": [1], "copies": 2, "filament": "auto"})
+        assert wait_for(lambda: farm.requests("/connector/submissions"))
+        body = json.loads(farm.requests("/connector/submissions")[0]["body"])
+        assert body["entries"][0]["quantity"] == 2 and body["entries"][0]["action"] == "queue_manual"
+        assert _notified(host, "bracket.gcode.3mf")
+        # A token is spent once: the same one sends nothing more.
+        host.ui.call(lambda: adapter.manual_send(item.token, Target.printer(1, IDENTITY), "X1C left"))
+        assert wait_for(lambda: any("bracket" in n["text"] and n["level"].name == "WarningNotificationLevel"
+                                    for n in host.notifications))  # fmt: skip
+        assert len(farm.requests("/connector/files")) == 1
+    finally:
+        host.close()
