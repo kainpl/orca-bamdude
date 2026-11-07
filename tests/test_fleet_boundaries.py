@@ -929,7 +929,7 @@ def test_a_delayed_list_of_an_older_namespace_does_not_bring_it_back():
         deliver(value)
 
     channel.deliver = delayed
-    rig.fleet.want_fleet(True)
+    rig.fleet.discover()  # one list read (want_fleet would queue the fleet's status read beside it)
     rig.fleet.tick()
     worker = threading.Thread(target=rig.jobs.queued.pop())
     worker.start()

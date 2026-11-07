@@ -58,11 +58,14 @@ from .api import Capabilities, ConnectorClient
 from .camera_relay import Target
 from .devices import Binding, Device, DeviceMap, dev_id, device_map
 from .poller import STALE_SECONDS, Poller
+from .tab import fleet_rows
 from .transport import Transport, TransportError
 
 PUSH_SECONDS = 3.0
 STATUS_SECONDS = 5.0
 PRINTERS_SECONDS = 60.0
+FLEET_SECONDS = 10.0  # the tab's view of every printer, only while the tab asks (§8.2)
+BATCH = 100  # the server's status batch size
 LOOP_SECONDS = 0.25
 JOIN_SECONDS = 5.0
 OK, FAILED = 0, 1  # rc ConnectStatus: Ok = 0, Failed = 1; Lost (2) is never sent
@@ -191,6 +194,12 @@ class Fleet:
         # Called (outside every lock, on the poll thread) the first time this load reads a namespace's list: the
         # Runtime reconciles that namespace's journal from there (spec r2 §7).
         self.on_namespace: Callable | None = None
+        # The tab's view (§8.2): ``tab_demand()`` -- the live-monitoring lease -- is asked every loop step;
+        # ``on_view(view)`` receives every printer's rows, outside every lock. ``refresh_view`` reads once.
+        self.tab_demand: Callable[[], bool] | None = None
+        self.on_view: Callable | None = None
+        self._tab_wanted = False
+        self._view_once = False
         self._last_push = 0.0
         self._seq = 0
         self._access_code = ""
@@ -198,6 +207,7 @@ class Fleet:
         self._stop = threading.Event()
         self.poller.add("printers", PRINTERS_SECONDS, self._fetch_printers, self._deliver_printers)
         self.poller.add("status", STATUS_SECONDS, self._fetch_status, self._deliver_status)
+        self.poller.add("fleet", FLEET_SECONDS, self._fetch_fleet, self._deliver_fleet)
 
     # -- settings ------------------------------------------------------------------------------------------------------
 
@@ -508,8 +518,10 @@ class Fleet:
             online = self._client is not None
             printers = online and (self._fleet_wanted or self._list_once)
             status = online and self._target is not None
+            fleet = online and self._map is not None and (self._fleet_wanted or self._view_once)
         self.poller.want("printers", printers)
         self.poller.want("status", status)
+        self.poller.want("fleet", fleet)
 
     def _learn(self, capabilities: Capabilities) -> bool:
         """Under the lock: the newest capabilities, and the server's polling floor with them. ``True`` the first time
@@ -543,6 +555,43 @@ class Fleet:
 
     def _current(self, read: _Read) -> bool:
         return read.generation == self._generation and read.era == self._era
+
+    # -- the tab's view of every printer (§8.2) ----------------------------------------------------------------------
+
+    def refresh_view(self) -> None:
+        """The tab's "Refresh": the list and every printer's status read once, without the lease."""
+        with self._lock:
+            self._view_once, self._list_once = True, True
+        self._update_wants()
+        self.poller.wake("printers")
+        self.poller.wake("fleet")
+
+    def _fetch_fleet(self):
+        read, client = self._started(None)
+        with self._lock:
+            devices = list(self._map.devices) if self._map is not None else []
+        ids = [device.printer_id for device in devices]
+        statuses: dict = {}
+        for start in range(0, len(ids), BATCH):
+            if self._stopping():
+                raise RuntimeError("stopped")
+            statuses.update(client.status_batch(ids[start : start + BATCH]))
+        return read, devices, statuses
+
+    def _deliver_fleet(self, value) -> None:
+        read, devices, statuses = value
+        with self._lock:
+            if not self._current(read):
+                return
+            self._view_once = False
+        self._update_wants()
+        printers = [{"id": d.printer_id, "name": d.name, "model_code": d.model_code} for d in devices]
+        view = {"rows": fleet_rows(printers, statuses), "read_at": time.time()}
+        if self.on_view is not None and not self.context.closed:
+            try:
+                self.on_view(view)
+            except Exception:  # noqa: BLE001 -- the tab's business; the fleet goes on
+                pass
 
     def _deliver_printers(self, value) -> None:
         read, capabilities, printers = value
@@ -705,10 +754,22 @@ class Fleet:
         if self.context.closed:
             self._revoke_camera()
             return
+        self._follow_tab_demand()
         self.poller.tick()
         self._answer_halted()
         self._push()
         self._revoke_camera()
+
+    def _follow_tab_demand(self) -> None:
+        wanted = False
+        if self.tab_demand is not None:
+            try:
+                wanted = bool(self.tab_demand())
+            except Exception:  # noqa: BLE001 -- a demand that cannot be read is none
+                wanted = False
+        if wanted != self._tab_wanted:
+            self._tab_wanted = wanted
+            self.want_fleet(wanted)
 
     def start(self) -> None:
         """The fleet's thread and the relay, from the first UI entry on (§4.3). Idempotent."""

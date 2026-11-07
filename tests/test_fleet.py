@@ -226,13 +226,17 @@ def test_discovery_reads_the_list_once_and_announces_only_known_models(rig):
 
 
 def test_the_tab_asks_for_the_list_every_minute_while_it_wants_the_fleet(rig):
+    # The list every minute; every printer's status is the fleet channel's (its own tests below).
+    def lists():
+        return [c for c in rig.requests() if c in ("capabilities", "printers")]
+
     rig.fleet.rebind(snapshot(1))
     rig.fleet.want_fleet(True)
     rig.step()
     rig.step(59)
-    assert rig.requests() == ["capabilities", "printers"]
+    assert lists() == ["capabilities", "printers"]
     rig.step(1.5)
-    assert rig.requests() == ["capabilities", "printers"]
+    assert lists() == ["capabilities", "printers"]
     rig.fleet.want_fleet(False)
     rig.step(61)
     assert rig.requests() == []
@@ -695,3 +699,59 @@ def test_stop_ends_the_loop_and_the_relay(rig):
     assert rig.relay.started
     assert rig.fleet.stop(timeout=2) is True
     assert rig.relay.stopped
+
+
+# -- the tab's fleet view (spec r2 §8.2): every printer's status, only under the tab's demand ------------------------
+
+
+def _views(rig):
+    views = []
+    rig.fleet.on_view = views.append
+    return views
+
+
+def test_without_the_tabs_demand_no_fleet_status_is_read(rig):
+    _views(rig)
+    rig.connected()
+    for _ in range(6):
+        rig.step(30)
+    assert not [c for c in rig.requests() if isinstance(c, tuple) and c[0] == "status" and len(c[1]) > 1]
+
+
+def test_under_the_tabs_demand_every_printer_s_status_is_read_and_handed_to_the_tab(rig):
+    views = _views(rig)
+    rig.fleet.rebind(snapshot(1))
+    rig.fleet.tab_demand = lambda: True
+    rig.step()
+    rig.step()
+    statuses = [c for c in rig.requests() if isinstance(c, tuple) and c[0] == "status"]
+    assert statuses and set(statuses[-1][1]) == {p["id"] for p in rig.server.printers}
+    assert views and {row["id"] for row in views[-1]["rows"]} == {p["id"] for p in rig.server.printers}
+    assert "read_at" in views[-1]
+
+
+def test_the_demand_going_away_stops_the_reads(rig):
+    _views(rig)
+    wanted = [True]
+    rig.fleet.rebind(snapshot(1))
+    rig.fleet.tab_demand = lambda: wanted[0]
+    rig.step()
+    rig.step()
+    rig.requests()
+    wanted[0] = False
+    for _ in range(4):
+        rig.step(30)
+    assert rig.requests() == []
+
+
+def test_refresh_reads_once(rig):
+    views = _views(rig)
+    rig.fleet.rebind(snapshot(1))
+    rig.fleet.refresh_view()
+    rig.step()
+    rig.step()
+    assert views
+    rig.requests()
+    for _ in range(4):
+        rig.step(30)
+    assert rig.requests() == []
