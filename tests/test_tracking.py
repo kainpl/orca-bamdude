@@ -5,11 +5,13 @@ only it, global ones pause tracking once, temporary ones back off that operation
 import time
 
 import pytest
+from fakes import Server, json_answer
 
-from orca_bamdude.api import Capabilities
+from orca_bamdude.api import Capabilities, ConnectorClient
+from orca_bamdude.config import Connection
 from orca_bamdude.journal import Journal
 from orca_bamdude.tracking import Tracker
-from orca_bamdude.transport import HttpError, TransportError
+from orca_bamdude.transport import HttpError, Transport, TransportError
 
 CAPS = Capabilities("srv", "ep", "key", "0.8.0", True, {"submissions": True}, {})
 
@@ -237,12 +239,6 @@ def test_an_operation_older_than_a_day_is_not_followed(env):
     ],
 )
 def test_a_global_refusal_from_the_wire_pauses_once(tmp_path, status, body):
-    from fakes import Server, json_answer
-
-    from orca_bamdude.api import ConnectorClient
-    from orca_bamdude.config import Connection
-    from orca_bamdude.transport import Transport
-
     server = Server(lambda m, p: json_answer(status, body))
     client = ConnectorClient(Transport(Connection.build(server.url, "bd_k"), timeout=5))
     journal = Journal(str(tmp_path), CAPS.namespace)
