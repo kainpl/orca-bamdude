@@ -28,7 +28,8 @@
   },
   "filament": {
     "auto": "Chosen by BamDude",
-    "external_only": "External spool only"
+    "external_only": "External spool only",
+    "pinned": "The slots chosen in OrcaSlicer (this plate only)"
   },
   "option": {
     "bed_levelling": "Bed levelling",
@@ -45,7 +46,8 @@
     "false": "off"
   },
   "warning": {
-    "vibration_cali_unsupported": "Vibration calibration is not supported by BamDude and is not sent."
+    "vibration_cali_unsupported": "Vibration calibration is not supported by BamDude and is not sent.",
+    "filament_unconfirmed": "OrcaSlicer chose slots the printer's current state does not show, so they cannot be kept. BamDude can choose the filament instead."
   },
   "progress": {
     "staging": "preparing",

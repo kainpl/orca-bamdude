@@ -239,12 +239,16 @@ def send_job(kind: str, params, update_fn, cancel_fn) -> int:
         RUNTIME.release(token)
         announce(refusal, name, "")
         return jobs.FAILED
-    device, client, capabilities = context
+    device, client, capabilities, status = context
     target = submit.Target.printer(device.printer_id, device.identity)
     source, plate_index = str(getattr(params, "filename", "")), int(getattr(params, "plate_index", 0) or 0)
     if kind == "print":
+        try:
+            pins = submit.pinned_mapping(params, status)
+        except submit.FilamentError:
+            pins, warnings = None, (*warnings, "filament_unconfirmed")  # offered as BamDude's choice, and said so
         request = submit.Request.native_print(
-            source, name, target, plate_index=plate_index, options=options, warnings=warnings
+            source, name, target, plate_index=plate_index, options=options, warnings=warnings, pins=pins
         )
     else:
         request = submit.Request.native_send(source, name, target, plate_index=plate_index)

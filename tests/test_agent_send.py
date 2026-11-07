@@ -21,6 +21,7 @@ class SendFarm(Farm):
     def __init__(self):
         super().__init__()
         self.submit_answer = None
+        self.ams = None
 
     def route(self, method, path):
         parts = urlsplit(path)
@@ -29,6 +30,12 @@ class SendFarm(Farm):
             body = json.loads(payload)
             body["features"].update(library_upload=True, submissions=True)
             body["limits"].update(max_upload_bytes=50_000_000, max_entries=64, max_copies_per_entry=999)
+            return json_answer(200, body)
+        if parts.path == "/base/api/v1/printers/status/batch" and self.ams is not None:
+            status, headers, payload = super().route(method, path)
+            body = json.loads(payload)
+            for entry in body.values():
+                entry["ams"] = self.ams
             return json_answer(200, body)
         if parts.path == "/base/api/v1/connector/files" and method == "POST":
             received = self.server.seen[-1]["body"]
@@ -156,3 +163,33 @@ def test_a_send_of_all_plates_goes_to_the_library_unless_a_queue_is_chosen(host,
     assert result["code"] == 0
     assert len(farm.requests("/connector/files")) == 1 and farm.requests("/connector/submissions") == []
     assert _notified(host, "library")
+
+
+def test_the_slots_chosen_in_orca_can_be_kept(host, farm, tmp_path):
+    farm.ams = [{"id": 0, "tray": [{"id": 2, "tray_type": "PLA"}]}]
+    dev = connected(host)
+    assert wait_for(lambda: host.device_messages and "ams" in host.device_messages[-1][1])
+    params = Params(dev, _project(tmp_path, (2,)), 2, "Cube_plate_2")
+    params.ams_mapping2 = '[{"ams_id":0,"slot_id":2},{"ams_id":255,"slot_id":255}]'
+    thread, result, _ = _job(host, "start_local_print", params)
+    assert wait_for(lambda: host.windows and host.windows[0]["open"])
+    assert 'value="pinned"' in host.windows[0]["html"]
+    host.window_submit(0, {"action": "queue_asap", "plates": [2], "copies": 1, "filament": "pinned"})
+    thread.join(10)
+    assert result["code"] == 0
+    (sent,) = farm.requests("/connector/submissions")
+    assert json.loads(sent["body"])["entries"][0]["filament"] == {"mode": "pinned", "ams_mapping": [2, -1]}
+
+
+def test_slots_the_printer_does_not_show_are_not_kept_and_the_window_says_so(host, farm, tmp_path):
+    dev = connected(host)
+    params = Params(dev, _project(tmp_path, (2,)), 2, "Cube_plate_2")
+    params.ams_mapping2 = '[{"ams_id":3,"slot_id":1}]'
+    thread, result, _ = _job(host, "start_local_print", params)
+    assert wait_for(lambda: host.windows and host.windows[0]["open"])
+    html = host.windows[0]["html"]
+    assert 'value="pinned"' not in html and 'class="warn"' in html
+    host.window_close(0)
+    thread.join(10)
+    assert result["code"] == -18  # a closed window is a cancel: nothing was sent
+    assert farm.requests("/connector/files") == []

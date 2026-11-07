@@ -183,3 +183,17 @@ def test_ask_after_the_fence_opens_nothing(tmp_path):
         is None
     )
     assert windows.opened == []
+
+
+def test_orcas_slots_are_offered_only_when_orca_named_them(tmp_path):
+    offer = _offer(tmp_path, plates=(1,), proposed=(1,))
+    pinned = Offer(Request("print", offer.request.source, "Cube", PRINTER, 1, pins=(2, -1)), *_rest(offer))
+    assert 'value="pinned"' in render(pinned, lambda k: k, target_name="P")
+    assert 'value="pinned"' not in render(offer, lambda k: k, target_name="P")
+    data = {"action": "queue_asap", "plates": [1], "copies": 1, "filament": "pinned"}
+    assert parse(data, pinned).filament == {"mode": "pinned", "ams_mapping": [2, -1]}
+    assert parse(data, offer) is None
+
+
+def _rest(offer):
+    return offer.staged, offer.inspection, offer.plates, offer.proposed, offer.default_action

@@ -454,9 +454,9 @@ class Fleet:
             return self._target
 
     def job_context(self, device_id: str):
-        """``admit_job`` and what the job then sends with, read together: the device, this generation's client and
-        its capabilities -- or ``foreign`` / ``stale``. A rebind afterwards closes that client, so a job never goes on
-        under another connection."""
+        """``admit_job`` and what the job then sends with, read together: the device, this generation's client, its
+        capabilities and the fresh status the slots Orca chose are confirmed against -- or ``foreign`` / ``stale``. A
+        rebind afterwards closes that client, so a job never goes on under another connection."""
         with self._lock:
             if self._target is None or self._target.dev_id != device_id or not self._connected:
                 return "foreign"
@@ -464,7 +464,7 @@ class Fleet:
                 return "stale"
             if self._client is None or self._capabilities is None:
                 return "foreign"
-            return self._target, self._client, self._capabilities
+            return self._target, self._client, self._capabilities, dict(self._status or {})
 
     # -- state ---------------------------------------------------------------------------------------------------------
 

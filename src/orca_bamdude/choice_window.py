@@ -71,6 +71,10 @@ def parse(data, offer: Offer) -> Choice | None:
         return None
     if isinstance(copies, bool) or not isinstance(copies, int) or copies < 1:
         return None
+    if filament == "pinned" and offer.request.pins is not None:
+        return Choice(
+            data["action"], tuple(plates), copies, {"mode": "pinned", "ams_mapping": list(offer.request.pins)}
+        )
     if filament not in FILAMENTS:
         return None
     return Choice(data["action"], tuple(plates), copies, {"mode": filament})
@@ -112,7 +116,8 @@ def render(offer: Offer, say, *, target_name: str) -> str:
         f'<input type="number" id="copies" min="1" max="999" value="1"></label></p>'
         f"<fieldset><legend>{e(say('window.filament'))}</legend>"
     )
-    for mode in FILAMENTS:
+    modes = FILAMENTS + (("pinned",) if request.pins is not None else ())  # only what Orca's dialog named
+    for mode in modes:
         ticked = " checked" if mode == "auto" else ""
         rows.append(
             f'<label><input type="radio" name="filament" value="{mode}"{ticked}> {e(say("filament." + mode))}</label>'

@@ -15,6 +15,7 @@ the server is asked to stop what it has not yet published.
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 import time
 import uuid
@@ -66,6 +67,61 @@ def options_from_params(params) -> tuple[dict, tuple[str, ...]]:
     return options, warnings
 
 
+class FilamentError(ValueError):
+    """A slot Orca named that the printer's fresh state cannot confirm: no pin is offered, nothing is guessed."""
+
+
+_UNUSED = (255, 255)  # Orca's ams_mapping2 entry for a filament the plate does not use
+_EXTERNAL = (255, 0)  # Orca's main external holder: the one vt_tray the dialect shows it (dialect.push_status)
+_PLAIN_UNITS, _HT_FIRST, _HT_UNITS = 4, 128, 8
+
+
+def pinned_mapping(params, status) -> tuple[int, ...] | None:
+    """The slots Orca's dialog chose (``ams_mapping2``, one entry per filament), as BamDude's feed source ids, or
+    ``None`` when it named none.
+
+    The ids are BamDude's own (``printer_feed_snapshot``): a plain AMS slot ``unit * 4 + slot``, an AMS HT its unit
+    id, an external holder its tray id. Orca saw the farm's units under their BamDude ids, and an external spool only
+    when the printer has one nozzle and one holder -- so a slot is confirmed only against the same fresh status, and
+    anything else raises :class:`FilamentError`. The legacy ``ams_mapping`` is not read: it says -1 for an external
+    spool (P0) and cannot tell one from an unused filament."""
+    raw = getattr(params, "ams_mapping2", "")
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise FilamentError("mapping") from exc
+    if not isinstance(entries, list) or not isinstance(status, dict):
+        raise FilamentError("mapping")
+    units = {}
+    for unit in status.get("ams") or []:
+        if isinstance(unit, dict) and isinstance(unit.get("id"), int):
+            units[unit["id"]] = {t.get("id") for t in unit.get("tray") or [] if isinstance(t, dict)}
+    holders = [h for h in status.get("vt_tray") or [] if isinstance(h, dict)]
+    nozzles = status.get("nozzles") if isinstance(status.get("nozzles"), list) else []
+    pins = []
+    for entry in entries:
+        ams_id = entry.get("ams_id") if isinstance(entry, dict) else None
+        slot = entry.get("slot_id") if isinstance(entry, dict) else None
+        if any(isinstance(v, bool) or not isinstance(v, int) for v in (ams_id, slot)):
+            raise FilamentError("mapping")
+        if (ams_id, slot) == _UNUSED or ams_id < 0 or slot < 0:
+            pins.append(-1)
+        elif 0 <= ams_id < _PLAIN_UNITS and slot in units.get(ams_id, ()):
+            pins.append(ams_id * 4 + slot)
+        elif _HT_FIRST <= ams_id < _HT_FIRST + _HT_UNITS and slot == 0 and 0 in units.get(ams_id, ()):
+            pins.append(ams_id)
+        elif (ams_id, slot) == _EXTERNAL and len(nozzles) <= 1 and len(holders) == 1:
+            holder = holders[0].get("id")
+            if isinstance(holder, bool) or not isinstance(holder, int) or not holders[0].get("tray_type"):
+                raise FilamentError("external")
+            pins.append(holder)
+        else:
+            raise FilamentError("topology")
+    return tuple(pins) if any(pin >= 0 for pin in pins) else None
+
+
 @dataclass(frozen=True)
 class Target:
     kind: str  # "printer" or "auto"
@@ -102,10 +158,12 @@ class Request:
     plate_index: int | None = None
     options: dict = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    pins: tuple[int, ...] | None = None  # the slots Orca's dialog chose, as BamDude ids (``pinned_mapping``)
 
     @classmethod
-    def native_print(cls, source, name, target, *, plate_index, options=None, warnings=()) -> Request:
-        return cls("print", source, name, target, int(plate_index), dict(options or {}), tuple(warnings))
+    def native_print(cls, source, name, target, *, plate_index, options=None, warnings=(), pins=None) -> Request:
+        pins = tuple(pins) if pins is not None else None
+        return cls("print", source, name, target, int(plate_index), dict(options or {}), tuple(warnings), pins)
 
     @classmethod
     def native_send(cls, source, name, target, *, plate_index) -> Request:
@@ -223,8 +281,21 @@ def _check(choice: Choice, options: dict, request: Request, plates, capabilities
         limits.get("max_total_jobs", 999)
     ):
         return _refused("too_many_jobs")
-    mode = (choice.filament or {}).get("mode")
-    if mode not in FILAMENT_MODES or (mode == "pinned" and request.target.kind != "printer"):
+    filament = choice.filament or {}
+    mode = filament.get("mode")
+    if mode not in FILAMENT_MODES:
+        return _refused("filament")
+    if mode == "pinned":
+        # Only exactly what Orca named, for the one plate its dialog mapped, on a printer (never the AutoQueue).
+        named = list(request.pins) if request.pins is not None else None
+        if (
+            request.target.kind != "printer"
+            or named is None
+            or filament.get("ams_mapping") != named
+            or len(chosen) != 1
+        ):
+            return _refused("filament")
+    elif "ams_mapping" in filament:
         return _refused("filament")
     return None
 

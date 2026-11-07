@@ -28,7 +28,8 @@
   },
   "filament": {
     "auto": "Вибере BamDude",
-    "external_only": "Лише зовнішня котушка"
+    "external_only": "Лише зовнішня котушка",
+    "pinned": "Слоти, вибрані в OrcaSlicer (лише ця плата)"
   },
   "option": {
     "bed_levelling": "Вирівнювання столу",
@@ -45,7 +46,8 @@
     "false": "вимк."
   },
   "warning": {
-    "vibration_cali_unsupported": "Калібрування вібрацій BamDude не підтримує, тож воно не надсилається."
+    "vibration_cali_unsupported": "Калібрування вібрацій BamDude не підтримує, тож воно не надсилається.",
+    "filament_unconfirmed": "OrcaSlicer вибрала слоти, яких немає в поточному стані принтера, тож зберегти їх не можна. Натомість філамент може вибрати BamDude."
   },
   "progress": {
     "staging": "підготовка",

@@ -382,3 +382,81 @@ def test_vibration_calibration_is_a_named_warning():
     params.task_vibration_cali = True
     _options, warnings = options_from_params(params)
     assert warnings == ("vibration_cali_unsupported",)
+
+
+# -- pinned slots (§6.3: only what Orca named, only on a topology the fresh state confirms) ----------------------------
+
+from orca_bamdude.submit import FilamentError, pinned_mapping  # noqa: E402
+
+
+class Mapped:
+    def __init__(self, mapping2):
+        self.ams_mapping2 = mapping2
+
+
+A1_MINI = {"nozzles": [{"nozzle_diameter": "0.4"}], "vt_tray": [{"id": 254, "tray_type": "PETG"}]}
+TWO_AMS = {
+    "nozzles": [{"nozzle_diameter": "0.4"}],
+    "ams": [{"id": 0, "tray": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}]}, {"id": 1, "tray": [{"id": 0}]}],
+}
+
+
+def test_the_external_spool_orca_chose_is_the_one_holder_bamdude_reported():
+    # P0, A1 mini: filament 1 on the external spool, the other three unused.
+    unused = '{"ams_id":255,"slot_id":255}'
+    raw = f'[{{"ams_id":255,"slot_id":0}},{unused},{unused},{unused}]'
+    assert pinned_mapping(Mapped(raw), A1_MINI) == (254, -1, -1, -1)
+
+
+def test_ams_slots_become_bamdudes_source_ids():
+    assert pinned_mapping(Mapped('[{"ams_id":0,"slot_id":2},{"ams_id":1,"slot_id":0}]'), TWO_AMS) == (2, 4)
+
+
+def test_an_ams_ht_is_its_own_unit_id():
+    status = {"nozzles": [{}], "ams": [{"id": 128, "tray": [{"id": 0}]}]}
+    assert pinned_mapping(Mapped('[{"ams_id":128,"slot_id":0}]'), status) == (128,)
+
+
+@pytest.mark.parametrize(
+    "raw,status",
+    [
+        ('[{"ams_id":2,"slot_id":0}]', TWO_AMS),  # a unit the fresh state does not hold
+        ('[{"ams_id":1,"slot_id":3}]', TWO_AMS),  # a slot it does not hold
+        ('[{"ams_id":255,"slot_id":0}]', {"nozzles": [{}, {}], "vt_tray": [{"id": 254, "tray_type": "PLA"}]}),
+        ('[{"ams_id":255,"slot_id":0}]', {"nozzles": [{}], "vt_tray": [{"id": 254}, {"id": 255}]}),
+        ('[{"ams_id":254,"slot_id":0}]', A1_MINI),
+        ('[{"ams_id":"0","slot_id":0}]', TWO_AMS),
+        ("not json", TWO_AMS),
+    ],
+)
+def test_a_slot_the_fresh_state_cannot_confirm_is_refused_not_guessed(raw, status):
+    with pytest.raises(FilamentError):
+        pinned_mapping(Mapped(raw), status)
+
+
+@pytest.mark.parametrize("raw", ["", "[]", '[{"ams_id":255,"slot_id":255}]', None])
+def test_no_named_slot_is_nothing_to_pin(raw):
+    assert pinned_mapping(Mapped(raw), TWO_AMS) is None
+
+
+def test_a_pinned_choice_sends_exactly_orcas_slots_for_one_plate(tmp_path, env):
+    request = Request.native_print(_project(tmp_path, (2,)), "Cube_plate_2", PRINTER, plate_index=2, pins=(2, -1))
+    client = Client()
+    choice = Choice("queue_asap", (2,), filament={"mode": "pinned", "ams_mapping": [2, -1]})
+    assert env.run(request, client, choose=lambda o: choice).result == "accepted"
+    assert client.calls[1][1]["entries"][0]["filament"] == {"mode": "pinned", "ams_mapping": [2, -1]}
+
+
+@pytest.mark.parametrize(
+    "pins,plates,filament",
+    [
+        (None, (2,), {"mode": "pinned", "ams_mapping": [2]}),  # Orca named no slot
+        ((2,), (2,), {"mode": "pinned", "ams_mapping": [3]}),  # not what Orca named
+        ((2,), (1, 2), {"mode": "pinned", "ams_mapping": [2]}),  # Orca's mapping is one plate's
+    ],
+)
+def test_a_pin_orca_did_not_name_is_refused(tmp_path, env, pins, plates, filament):
+    request = Request.native_print(_project(tmp_path, (1, 2)), "Cube", PRINTER, plate_index=2, pins=pins)
+    client = Client()
+    outcome = env.run(request, client, choose=lambda o: Choice("queue_asap", plates, filament=filament))
+    assert outcome.result == "refused" and outcome.code == "filament" and client.calls == []
