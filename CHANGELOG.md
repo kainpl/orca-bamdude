@@ -3,8 +3,9 @@
 ## [Unreleased]
 
 - The plugin's host-independent core: connection settings that accept one server URL and refuse anything that could
-  send the key elsewhere, an HTTP client that always verifies TLS -- against a private CA pasted as PEM text, never a
-  file path -- and never follows a redirect, a bounded reader for sliced 3MF files, the plugin's own hashed copy of
+  send the key elsewhere, an HTTP client that always verifies TLS (against a private CA pasted as PEM text, never a
+  file path), never follows a redirect and reaches a server name at whichever of its addresses answers, a bounded
+  reader for sliced 3MF files, the plugin's own hashed copy of
   the file being sent, and a journal that records every operation before its first request so a lost answer never
   queues the work twice. Its records are versioned and older ones stay readable, and the history shows what was
   sent to another server, or before a restore, as unknown -- it is never sent again from there. A record is written only
