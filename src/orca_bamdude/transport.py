@@ -42,7 +42,7 @@ UPLOAD_CHUNK = 256 * 1024
 
 class TransportError(Exception):
     """The request did not get a usable answer. ``kind`` is stable: timeout, tls, connect, redirect, protocol,
-    too_large, cancelled."""
+    incomplete, too_large, cancelled."""
 
     def __init__(self, kind: str):
         super().__init__(kind)
@@ -73,9 +73,17 @@ def _retry_after(response: http.client.HTTPResponse) -> float | None:
 
 
 def _read_bounded(response: http.client.HTTPResponse, limit: int) -> bytes:
-    data = response.read(limit + 1)
+    """The body, at most ``limit`` bytes. A body that ends before its ``Content-Length`` is ``incomplete``:
+    ``read(n)`` returns the short bytes without ``IncompleteRead``, and an answer cut off after its headers would
+    otherwise pass for an empty success (H7: an upload "with other bytes", a server "that is not BamDude")."""
+    try:
+        data = response.read(limit + 1)
+    except http.client.IncompleteRead as exc:  # the chunked reader does raise it
+        raise TransportError("incomplete") from exc
     if len(data) > limit:
         raise TransportError("too_large")
+    if response.length:  # what Content-Length still promised when the connection ended
+        raise TransportError("incomplete")
     return data
 
 

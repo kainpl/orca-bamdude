@@ -19,9 +19,9 @@
   which is where the server checks the key again; a camera that sends no picture is reported as such, never as
   working.
 - One scheduler for everything the plugin reads from the farm. It asks only while something is on screen or tracked,
-  never more often than the server allows, backs off when the server is slow or unreachable, stops asking when the
-  key or the address is wrong instead of retrying forever, and shows a printer it has not heard about for 30 seconds
-  as unknown rather than idle.
+  never more often than the server allows, backs off when the server is slow or unreachable, asks again when an
+  answer was cut off on the way, stops asking when the key or the address is wrong instead of retrying forever, and
+  shows a printer it has not heard about for 30 seconds as unknown rather than idle.
 - The plugin registers with OrcaSlicer 2.5 as a printer agent named "BamDude" and a "BamDude" tab, and asks for its
   permissions once, at start-up: its own threads, OrcaSlicer's temporary model files, a local camera relay, and the
   farm address you configured. If you answer No, OrcaSlicer turns the plugin off; when you turn it back on, the
@@ -33,8 +33,9 @@
 - Farm printers in OrcaSlicer's device list. Choosing the BamDude agent lists the printers your key may see whose
   model OrcaSlicer knows, under their BamDude names; the selected one shows its state, temperatures, progress, AMS
   and external spool on the Device tab, and its live camera through the local relay. Nothing BamDude does not know is
-  shown as known: a printer BamDude cannot reach stays selectable -- the farm can still queue work for it -- but its
-  state and temperatures are left out, and a printer with two nozzles shows no nozzle temperature rather than the
+  shown as known: a printer BamDude cannot reach stays selectable -- the farm can still queue work for it through
+  Send, while OrcaSlicer's Print waits for a firmware version BamDude has not read -- but its state and temperatures
+  are left out, and a printer with two nozzles shows no nozzle temperature rather than the
   wrong one -- nor an external spool or an AMS on a side BamDude did not name. An AMS HT and an AMS 2 Pro show as
   what they are, and a slot shows a spool when the printer's own sensor says so, not because a filament was once set
   for it. When the farm stops answering, the plugin stops reporting and OrcaSlicer shows the printer offline about
@@ -60,8 +61,8 @@
 - The BamDude tab. It shows where the connection comes from -- the tab or a printer preset -- and edits it: the
   address, the API key (kept, replaced or removed; never shown), proxy headers whose values are never shown, a
   certificate authority pasted as PEM text and the export folder. "Check the connection" goes step by step --
-  OrcaSlicer's permission, reaching the server, the BamDude connector, the key, the printers, the rights -- and names
-  what is missing. The farm view reads every printer only while "Live monitoring" is on: it starts off and switches
+  OrcaSlicer's permission, reaching the server, the BamDude connector, the key, the printers, the rights -- names
+  what is missing and says in a sentence why a step failed. The farm view reads every printer only while "Live monitoring" is on: it starts off and switches
   itself off, saying so, ten minutes after your last action in the tab; "Refresh" reads once. A camera picture of a
   printer, sending a file from the export folder to a printer or to the AutoQueue, the history of what was sent with
   its actions (check, go on, cancel what has not started, send as new after a confirmation) and Open BamDude are

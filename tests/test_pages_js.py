@@ -84,3 +84,71 @@ def test_a_printer_that_is_not_known_now_shows_no_state_and_no_numbers(mode):
     cells = _cells(connected=False) if mode == "printer_disconnected" else _cells(age_seconds=3600)
     assert cells[2] == i18n.say("en", "tab.unknown")
     assert cells[3:5] == ["", ""]
+
+
+def _page(steps, read, lang="en"):
+    page = ui.render(lambda k: i18n.say(lang, k))
+    return probe({"mode": "page", "html": page, "steps": steps, "read": read})
+
+
+def _say(key, lang="en"):
+    return i18n.say(lang, key)
+
+
+@pytest.mark.parametrize("previous, shown", [("completed", False), ("unfinished", True), (None, False)])
+def test_only_an_unfinished_previous_start_is_called_unfinished(previous, shown):
+    # H7 A3, E2, U1: after every ordinary restart the tab said the previous start "did not finish its permission
+    # request" -- the notice took any previous load for an unfinished one.
+    state = {"kind": "state", "previous_load": previous, "held": [], "settings": {"server_url": "http://127.0.0.1"}}
+    texts = _page([{"message": state}], ["notices"])["read"]["notices"]["texts"]
+    assert (_say("tab.previous_load") in texts) is shown
+
+
+@pytest.mark.parametrize("lang", ["en", "uk"])
+@pytest.mark.parametrize(
+    "step, code, sentence",
+    [
+        ("reach", "tls", "tab.check_code.tls"),
+        ("reach", "incomplete", "tab.check_code.incomplete"),
+        ("reach", "html_answer", "tab.check_code.html_answer"),
+        ("protocol", "not_bamdude", "tab.check_code.not_bamdude"),
+        ("key", "unauthorized", "tab.check_code.unauthorized"),
+        ("permission", "missing", "tab.blocked.missing"),
+    ],
+)
+def test_a_failed_check_step_says_why_in_a_sentence(lang, step, code, sentence):
+    # H7 D3/D6: "Server reachable: Not done: tls" -- a code where spec r2 §8.1 asks for a separate answer per case.
+    steps = [{"step": "permission", "ok": True}, {"step": step, "ok": False, "code": code}]
+    texts = _page([{"message": {"kind": "test", "steps": steps}}], ["steps"], lang)["read"]["steps"]["texts"]
+    line = texts[-1]
+    assert line == _say(f"tab.step.{step}", lang) + ": " + _say(sentence, lang)
+    assert _say("tab.error", lang).split("{code}")[0] not in line  # no "Not done: <code>" frame
+
+
+def test_a_code_without_a_sentence_still_names_itself():
+    steps = [{"step": "reach", "ok": False, "code": "http_418"}]
+    texts = _page([{"message": {"kind": "test", "steps": steps}}], ["steps"])["read"]["steps"]["texts"]
+    assert texts[-1] == _say("tab.step.reach") + ": " + _say("tab.error").replace("{code}", "http_418")
+
+
+@pytest.mark.parametrize("connected, key", [(False, "tab.history_offline"), (True, "tab.no_history")])
+def test_the_history_says_nothing_was_sent_only_when_it_could_read_the_history(connected, key):
+    # H7 D6: with no answer from the server yet, the tab said "Nothing sent yet." above a journal of sends.
+    message = {"kind": "history", "rows": [], "connected": connected}
+    texts = _page([{"message": message}], ["history"])["read"]["history"]["texts"]
+    assert texts == [_say(key)]
+
+
+def test_send_to_offers_the_autoqueue_and_asks_for_the_farm_before_any_farm_view():
+    # H7 B6: after a restart "Send to" stayed an empty list until Refresh in the farm section.
+    result = _page([{"click": "list-files"}], ["target"])
+    assert result["read"]["target"]["values"] == ["auto"]
+    assert {"op": "exports"} in result["outbound"] and {"op": "refresh"} in result["outbound"]
+
+
+def test_send_to_does_not_read_the_farm_again_once_it_knows_the_printers():
+    rows = fleet_rows([{"id": 1, "name": "Test", "model_code": "C12"}], {1: {"connected": True}})
+    fleet = {"kind": "fleet", "rows": rows, "read_at": 0}
+    result = _page([{"message": fleet}, {"click": "list-files"}], ["target"])
+    assert result["read"]["target"]["values"] == ["printer:1", "auto"]
+    assert {"op": "refresh"} not in result["outbound"]

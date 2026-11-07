@@ -217,6 +217,21 @@ def test_backoff_is_jittered_downward():
     assert poller.next_due("status") - clock.now == 5  # 10 s halved, never below the interval
 
 
+def test_an_answer_cut_off_is_asked_again_never_a_halt(rig):
+    # H7 D6: one dropped answer must not stop the channel until the settings change, as an incompatible server does.
+    poller, clock, jobs = rig
+    status = Channel(TransportError("incomplete"), "answer")
+    _add(poller, "status", 5, status)
+
+    poller.tick()
+    jobs.run_all()
+    assert poller.halted("status") is None
+    clock.now = poller.next_due("status")
+    poller.tick()
+    jobs.run_all()
+    assert status.calls == 2
+
+
 def test_retry_after_is_honoured_up_to_the_ceiling(rig):
     poller, clock, jobs = rig
     busy = HttpError(429, "busy", "", retry_after=45)

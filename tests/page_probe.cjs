@@ -35,6 +35,18 @@ if (input.mode === 'config') {
   const displayed = {url:element('url').value, note:element('from-tab').textContent};
   element('save').onclick();
   process.stdout.write(JSON.stringify({displayed, outbound}));
+} else if (input.mode === 'page') {
+  // The tab as the person sees it after the plugin's messages and the person's clicks (H7 fixes).
+  global.orca = {postMessage:m=>outbound.push(m), onMessage:callback=>global.receivePage=callback};
+  scripts(input.html);
+  for (const step of input.steps) {
+    if (step.message) receivePage(step.message);
+    else if (step.click) element(step.click).onclick();
+  }
+  const texts = e => [e.textContent, ...e.children.flatMap(texts)].filter(Boolean);
+  const read = {};
+  for (const id of input.read) read[id] = {texts: texts(element(id)), values: element(id).children.map(c => c.value)};
+  process.stdout.write(JSON.stringify({read, outbound}));
 } else {
   global.orca = {postMessage:m=>outbound.push(m), onMessage:callback=>global.receivePage=callback};
   scripts(input.html);

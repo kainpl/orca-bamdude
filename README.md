@@ -100,6 +100,10 @@ original.
 - **Print** offers the queue first; **Send** offers the library first and queues nothing unless you choose to. A
   notification says where the file went. After Send, OrcaSlicer's own message speaks of "the printer's storage" —
   that is OrcaSlicer's text; the file is in BamDude's library.
+- **A printer BamDude cannot reach** (switched off, say). OrcaSlicer's Print waits for the printer's firmware version,
+  which the plugin passes on only when BamDude has read it from the printer; without it, Print's Send button stays
+  grey after "Synchronizing device information timed out". Use Send: after the same wait of about half a minute it
+  opens the plugin's window, where the plate can still go to the queue.
 - **The AMS slots you chose in OrcaSlicer** can be kept for a single plate when the printer's current state still
   shows them; otherwise the window says so and BamDude chooses.
 - **Cancel** in OrcaSlicer's dialog returns at once; if the farm already had the request, the plugin asks it to stop

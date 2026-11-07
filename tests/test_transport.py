@@ -84,6 +84,40 @@ def test_an_oversized_answer_is_refused(serve):
     assert refused.value.kind == "too_large"
 
 
+@pytest.mark.parametrize("body", [b"", b'{"id": 7, "fi'])
+@pytest.mark.parametrize("call", ["request", "upload"])
+def test_an_answer_cut_off_before_its_length_is_incomplete_not_an_empty_success(call, body, tmp_path):
+    # H7 D7/D6: a front forwarded the headers and dropped the body; http.client's read(n) then returns the short
+    # bytes without IncompleteRead, and a 200 without a body was taken for an empty answer -- an upload "with other
+    # bytes", a server "that is not BamDude" whose reads stayed halted.
+    def answer(conn, release):
+        conn.recv(1 << 20)
+        head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 50\r\nConnection: close\r\n\r\n"
+        conn.sendall(head.encode() + body)
+        conn.shutdown(socket.SHUT_WR)  # an orderly end, as the stand's front gave: EOF, not a reset
+        conn.settimeout(2)
+        try:
+            while conn.recv(65536):
+                pass
+        except OSError:
+            pass
+
+    listener, _release, _started, thread = _raw_server(answer)
+    transport = Transport(Connection.build(f"http://127.0.0.1:{listener.getsockname()[1]}", "bd_synthetic"), timeout=5)
+    source = tmp_path / "part.gcode.3mf"
+    source.write_bytes(b"PK\x03\x04" + b"x" * 1000)
+    try:
+        with pytest.raises(TransportError) as refused:
+            if call == "request":
+                transport.request_json("GET", "/api/v1/connector/capabilities")
+            else:
+                transport.upload_file("/api/v1/connector/files", str(source), source.stat().st_size)
+        assert refused.value.kind == "incomplete"
+    finally:
+        thread.join(5)
+        listener.close()
+
+
 def test_an_upload_streams_the_file_as_the_raw_body(serve, tmp_path):
     server, transport = serve(lambda m, p: _json(200, {"id": 7, "outcome": "created"}))
     payload = b"PK\x03\x04" + b"x" * 700_000

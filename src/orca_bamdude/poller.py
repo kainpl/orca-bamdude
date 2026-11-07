@@ -36,7 +36,7 @@ STALE_SECONDS = 30.0
 TICK_SECONDS = 0.25
 JOIN_SECONDS = 5.0
 
-_TRANSIENT_KINDS = {"timeout", "connect", "protocol", "too_large", "cancelled"}
+_TRANSIENT_KINDS = {"timeout", "connect", "protocol", "incomplete", "too_large", "cancelled"}
 _HALT_STATUSES = {401: "unauthorized", 403: "forbidden", 404: "not_found"}
 
 

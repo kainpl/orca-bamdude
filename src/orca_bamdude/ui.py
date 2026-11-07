@@ -16,6 +16,25 @@ STEPS = ("permission", "reach", "protocol", "key", "printers", "features")
 PHASES = ("prepared", "uploading", "uploaded", "submitting", "accepted", "unknown", "finished", "upload_only")
 ACTIONS = ("reconcile", "resume", "cancel", "send_as_new")
 MILESTONES = ("queued", "assigned", "started", "first_layer", "completed", "failed", "cancelled", "unavailable")
+BLOCKED = ("problem", "missing", "state_unreadable", "held", "needs_restart")
+# A failed check step's code with a sentence of its own (spec r2 §8.1: a separate answer per case); any other code is
+# still named, as "Not done: <code>". The permission step's codes are BLOCKED, whose sentences the tab already has.
+CHECK_CODES = (
+    "tls",
+    "timeout",
+    "connect",
+    "redirect",
+    "html_answer",
+    "incomplete",
+    "too_large",
+    "cancelled",
+    "not_bamdude",
+    "protocol_version",
+    "capabilities_shape",
+    "connector_disabled",
+    "unauthorized",
+    "forbidden",
+)
 RIGHTS = {  # spec r2 §9.1: the right each feature needs, shown by name
     "monitor": "printers:read",
     "library_upload": "library:upload + library:read_all",
@@ -84,20 +103,18 @@ KEYS = (
     "tab.history",
     "tab.reload_history",
     "tab.no_history",
+    "tab.history_offline",
     "tab.foreign",
     "tab.confirm_new",
     "tab.open_bamdude",
     "tab.error",
+    *(f"tab.check_code.{code}" for code in CHECK_CODES),
     *(f"tab.step.{step}" for step in STEPS),
     *(f"tab.phase.{phase}" for phase in PHASES),
     *(f"tab.action.{action}" for action in ACTIONS),
     "tab.notice.dashboard_needs_restart",
     "tab.notice.dashboard_refused",
-    "tab.blocked.problem",
-    "tab.blocked.missing",
-    "tab.blocked.state_unreadable",
-    "tab.blocked.held",
-    "tab.blocked.needs_restart",
+    *(f"tab.blocked.{code}" for code in BLOCKED),
 )
 
 
@@ -183,6 +200,26 @@ function labels() {
   ["name", "model", "state", "progress", "remaining"].forEach(function (c) { head.appendChild(node("th", t("tab.col_" + c))); });
   head.appendChild(node("th", ""));
   el("aq-model").placeholder = t("tab.autoqueue_model");
+  drawTargets([]);
+}
+
+// "Send to": the printers the farm view read, then the AutoQueue -- which needs no printer list, so it is there from
+// the start, before anything was read.
+function drawTargets(rows) {
+  var select = el("target"), chosen = select.value; clear(select);
+  rows.forEach(function (r) { var o = node("option", r.name); o.value = "printer:" + r.id; select.appendChild(o); });
+  var aq = node("option", t("tab.autoqueue")); aq.value = "auto"; select.appendChild(aq);
+  if (chosen) { select.value = chosen; }
+  el("aq-model").hidden = select.value !== "auto";
+}
+
+function hasSentence(key) { return Object.prototype.hasOwnProperty.call(T, key); }
+
+// A failed step's reason as a sentence where the code has one (spec r2 §8.1); otherwise the code itself.
+function stepReason(s) {
+  var code = s.code || "";
+  var key = (s.step === "permission" ? "tab.blocked." : "tab.check_code.") + code;
+  return hasSentence(key) ? t(key) : t("tab.error").replace("{code}", code);
 }
 
 function showState(s) {
@@ -200,7 +237,7 @@ function showState(s) {
   drawHeaders();
   var notices = el("notices"); clear(notices);
   if (s.blocked) { notices.appendChild(node("p", t("tab.blocked." + s.blocked), "warn")); }
-  if (s.previous_load) { notices.appendChild(node("p", t("tab.previous_load"), "muted")); }
+  if (s.previous_load === "unfinished") { notices.appendChild(node("p", t("tab.previous_load"), "muted")); }
   if (s.state_repaired) { notices.appendChild(node("p", t("tab.state_repaired"), "warn")); }
   el("held-box").hidden = !(s.held && s.held.length);
   text("held", t("tab.held").replace("{targets}", (s.held || []).map(function (h) { return h.replace(/^[a-z_]+:/, ""); }).join(", ")));
@@ -238,7 +275,7 @@ function save() {
 function showSteps(steps) {
   var list = el("steps"); clear(list);
   steps.forEach(function (s) {
-    var line = t("tab.step." + s.step) + ": " + (s.ok ? t("tab.step_ok") : t("tab.error").replace("{code}", s.code || ""));
+    var line = t("tab.step." + s.step) + ": " + (s.ok ? t("tab.step_ok") : stepReason(s));
     if (s.step === "printers" && s.ok) { line += " " + t("tab.printers_seen").replace("{count}", s.count).replace("{known}", s.known); }
     if (s.step === "features") {
       line = t("tab.step.features") + ": " + (s.missing.length ? t("tab.missing_rights").replace("{rights}",
@@ -267,11 +304,7 @@ function showFleet(view) {
     tr.appendChild(cell); body.appendChild(tr);
   });
   text("read-at", t(old ? "tab.read_old" : "tab.read_at").replace("{time}", new Date(view.read_at * 1000).toLocaleTimeString()));
-  var select = el("target"), chosen = select.value; clear(select);
-  view.rows.forEach(function (r) { var o = node("option", r.name); o.value = "printer:" + r.id; select.appendChild(o); });
-  var aq = node("option", t("tab.autoqueue")); aq.value = "auto"; select.appendChild(aq);
-  if (chosen) { select.value = chosen; }
-  el("aq-model").hidden = select.value !== "auto";
+  drawTargets(view.rows);
 }
 
 function showFiles(rows) {
@@ -290,8 +323,10 @@ function showFiles(rows) {
   });
 }
 
-function showHistory(rows, writable, paused) {
+function showHistory(rows, writable, paused, connected) {
   var body = el("history"); clear(body);
+  // Before the server answers, the plugin cannot tell whose records to show: that is not "nothing sent".
+  if (connected === false) { var wait = node("tr"); wait.appendChild(node("td", t("tab.history_offline"), "muted")); body.appendChild(wait); return; }
   if (paused) {
     var pause = node("tr"), cell = node("td", t("tab.tracking_paused").replace("{reason}", paused), "warn");
     cell.appendChild(button(t("tab.track_again"), function () { send({op: "track_again"}); }));
@@ -324,7 +359,7 @@ function receive(m) {
   else if (m.kind === "fleet") { showFleet(m); }
   else if (m.kind === "test") { showSteps(m.steps); }
   else if (m.kind === "exports") { showFiles(m.rows); }
-  else if (m.kind === "history") { showHistory(m.rows, m.writable, m.paused); }
+  else if (m.kind === "history") { showHistory(m.rows, m.writable, m.paused, m.connected); }
   else if (m.kind === "snapshot") { var img = el("shot"); img.src = m.data_url; img.hidden = false; }
   else if (m.kind === "notice") { el("notices").appendChild(node("p", t("tab.notice." + m.code), "warn")); }
   else if (m.kind === "error") { el("notices").appendChild(node("p", t("tab.error").replace("{code}", (m.op || "") + ": " + (m.code || "")), "bad")); }
@@ -337,7 +372,8 @@ el("add-header").onclick = function () { state.headers.push({name: "", action: "
 el("check").onclick = function () { clear(el("steps")); send({op: "test"}); };
 el("live").onchange = function () { send({op: "live", on: el("live").checked}); };
 el("refresh").onclick = function () { send({op: "refresh"}); };
-el("list-files").onclick = function () { send({op: "exports"}); };
+// The printers of "Send to" come with a farm view; with none read yet, listing the files reads one (H7 B6).
+el("list-files").onclick = function () { send({op: "exports"}); if (!state.printers.length) { send({op: "refresh"}); } };
 el("target").onchange = function () { el("aq-model").hidden = el("target").value !== "auto"; };
 el("reload-history").onclick = function () { send({op: "history"}); };
 el("open-bamdude").onclick = function () { send({op: "open_bamdude"}); };
