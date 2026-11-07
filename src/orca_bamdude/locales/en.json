@@ -4,5 +4,91 @@
     "setup": "BamDude has no usable connection. Open the BamDude tab to check its settings.",
     "restart": "OrcaSlicer has not allowed this BamDude server yet. The BamDude tab says how to allow it.",
     "refused": "The BamDude server refused the connection. Check the API key in the BamDude tab."
+  },
+  "window": {
+    "title": "Send to BamDude",
+    "heading": "Send to BamDude",
+    "file": "File",
+    "size": "Size",
+    "hash": "SHA-256",
+    "target": "To",
+    "plates": "Plates",
+    "plate": "Plate {n}",
+    "action": "What BamDude does",
+    "copies": "Copies of each plate",
+    "filament": "Filament",
+    "options": "Print options",
+    "send": "Send",
+    "cancel": "Cancel"
+  },
+  "action": {
+    "queue_asap": "Print when the queue allows",
+    "queue_manual": "Add to the queue, start by hand",
+    "library_only": "Only put it in the library"
+  },
+  "filament": {
+    "auto": "Chosen by BamDude",
+    "external_only": "External spool only"
+  },
+  "option": {
+    "bed_levelling": "Bed levelling",
+    "flow_cali": "Flow calibration",
+    "nozzle_offset_cali": "Nozzle offset calibration",
+    "timelapse": "Timelapse",
+    "layer_inspect": "First layer inspection"
+  },
+  "value": {
+    "off": "off",
+    "on": "on",
+    "auto": "auto",
+    "true": "on",
+    "false": "off"
+  },
+  "warning": {
+    "vibration_cali_unsupported": "Vibration calibration is not supported by BamDude and is not sent."
+  },
+  "progress": {
+    "staging": "preparing",
+    "uploading": "uploading",
+    "submitting": "queuing"
+  },
+  "target": {
+    "auto": "the AutoQueue"
+  },
+  "send": {
+    "queued": "BamDude queued {file} for {target}.",
+    "library": "{file} is in the BamDude library. Nothing was queued.",
+    "partial": "BamDude queued only part of {file}. Open BamDude to see what was refused.",
+    "unknown": "BamDude has not confirmed {file} yet. The plugin will check again; do not send it twice.",
+    "cancelled": "Sending {file} was cancelled. Nothing new was queued.",
+    "refused": "BamDude did not take {file}: {reason}"
+  },
+  "reason": {
+    "generic": "the request was refused ({code}).",
+    "plate_ambiguous": "the file does not hold the plate OrcaSlicer named. Slice again and send once more.",
+    "not_sliced": "the file holds no sliced plate.",
+    "host_version": "this OrcaSlicer version is not supported for sending. Monitoring still works.",
+    "not_permitted": "the API key may not do this. The BamDude tab names the missing right.",
+    "connector_disabled": "the connector is switched off on the BamDude server.",
+    "hash_mismatch": "the server received different bytes than the plugin sent. Nothing was queued.",
+    "upload_busy": "another upload did not finish in time. Try again.",
+    "no_plates": "no plate was chosen for the queue.",
+    "copies": "the number of copies is outside what the server allows.",
+    "too_many_jobs": "too many jobs in one send.",
+    "filament": "this filament choice cannot be sent to this target.",
+    "option_not_for_autoqueue": "the AutoQueue cannot keep a nozzle offset calibration choice.",
+    "option": "OrcaSlicer chose a value of \"{option}\" the plugin does not know.",
+    "foreign": "this printer belongs to an earlier BamDude connection. Choose it again in the device list.",
+    "stale": "BamDude has not heard from this printer recently.",
+    "too_large": "the file is larger than the server accepts.",
+    "source_missing": "OrcaSlicer's file is gone.",
+    "source_changed": "OrcaSlicer changed the file while it was copied. Send again.",
+    "disk_error": "the plugin could not copy the file.",
+    "timeout": "the server did not answer in time.",
+    "connect": "the server could not be reached.",
+    "tls": "the server's certificate was not accepted.",
+    "redirect": "the server answered with a redirect. Enter the final address in the BamDude tab.",
+    "protocol": "the server's answer was not understood.",
+    "rejected": "BamDude refused every plate. Open BamDude to see why."
   }
 }
