@@ -359,3 +359,11 @@ def test_saving_in_the_tab_changes_the_base_and_never_the_presets_override(host)
     assert wait_for(lambda: (host.read_base(AGENT) or {}).get("export_dir") == str(host.storage_dir))
     (entry,) = [e for e in host.preset_overrides if e["capability"] == AGENT]
     assert entry["cap_config"] == override
+
+
+def test_the_tabs_icon_is_a_file_of_the_plugin(host):
+    import os
+
+    assert host.load()
+    icon = host.capability("BamDude").get_icon()
+    assert os.path.isabs(icon) and os.path.isfile(icon) and icon.endswith("bamdude.svg")

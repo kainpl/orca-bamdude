@@ -522,6 +522,12 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
     def get_name(self):
         return PAGE_CAPABILITY
 
+    def get_icon(self):
+        """The tab's icon: an absolute path, which rc's ``Slic3r::var`` takes as it is when the file exists; the
+        extension is dropped and the SVG loaded at 20 px (``PluginPages.cpp``). The mark carries its own dark tile,
+        so it reads on both themes."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "bamdude.svg")
+
     def get_ui(self):
         """The tab's page in OrcaSlicer's language (UI thread, at every (re)load)."""
         refresh_settings()
