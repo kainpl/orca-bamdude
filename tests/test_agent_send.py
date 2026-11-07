@@ -232,3 +232,35 @@ def test_a_file_of_the_export_folder_is_sent_by_its_token(tmp_path, farm):
         assert len(farm.requests("/connector/files")) == 1
     finally:
         host.close()
+
+
+# -- following the send (spec r2 §9; plan r2 H5) -----------------------------------------------------------------------
+
+
+def test_a_printed_send_is_followed_until_it_starts(host, farm, tmp_path):
+    observed = {"jobs": [{"entry_id": "e1", "job": {"kind": "queue", "identity": "q1"}, "state": "printing",
+                          "printer": {"id": 1, "identity": IDENTITY},
+                          "executions": [{"identity": "a1", "state": "printing", "first_layer": None}],
+                          "executions_complete": True}], "next_cursor": None}  # fmt: skip
+    route = farm.route
+
+    def with_observations(method, path):
+        parts = urlsplit(path)
+        if method == "GET" and parts.path.startswith("/base/api/v1/connector/submissions/"):
+            op = parts.path.rsplit("/", 1)[1]
+            return json_answer(200, {"operation_id": op, "state": "complete", "entries": [], "observations": observed})
+        return route(method, path)
+
+    farm.server.routes = with_observations
+    dev = connected(host)
+    params = Params(dev, _project(tmp_path, (2,)), 2, "Cube_plate_2")
+    thread, result, _ = _job(host, "start_local_print", params)
+    assert wait_for(lambda: host.windows and host.windows[0]["open"])
+    host.window_submit(0, {"action": "queue_asap", "plates": [2], "copies": 1, "filament": "auto"})
+    thread.join(10)
+    assert result["code"] == 0
+    assert wait_for(
+        lambda: any("X1C left" in n["text"] and "Cube_plate_2" in n["text"] for n in host.notifications[1:])
+    )
+    gets = [s for s in farm.server.seen if s["method"] == "GET" and "observations=1" in s["path"]]
+    assert gets

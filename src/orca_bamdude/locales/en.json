@@ -112,7 +112,15 @@
     "export_missing": "the file is gone from the export folder.",
     "export_not_a_file": "the export folder holds a link or something other than a file there.",
     "export_outside_root": "the file leads outside the export folder and is not sent.",
-    "export_changed": "the file changed after it was listed. Refresh the list."
+    "export_changed": "the file changed after it was listed. Refresh the list.",
+    "chain_broken": "it was moved to another queue.",
+    "out_of_scope": "its printer is outside the key's printers now.",
+    "legacy_receipt": "it was sent by an older version.",
+    "printer_scope": "its printer is outside the key's printers now.",
+    "auto_requires_unrestricted_key": "the key is limited to some printers, and the AutoQueue needs all.",
+    "http_401": "the API key is not accepted.",
+    "http_403": "the API key may not read the queue.",
+    "incompatible": "the server speaks another protocol."
   },
   "export": {
     "file": "the file"
@@ -214,7 +222,19 @@
     },
     "minutes": "{n} min",
     "read_old": "last read at {time}; not current",
-    "writer_blocked": "This OrcaSlicer version may not send: going on with a send or sending it again is not offered. Checking and cancelling still work."
+    "writer_blocked": "This OrcaSlicer version may not send: going on with a send or sending it again is not offered. Checking and cancelling still work.",
+    "tracking_paused": "Following what was sent is paused ({reason}).",
+    "track_again": "Follow again",
+    "milestone": {
+      "queued": "in the queue",
+      "assigned": "printer chosen",
+      "started": "printing",
+      "first_layer": "first layer done",
+      "completed": "finished",
+      "failed": "failed",
+      "cancelled": "cancelled",
+      "unavailable": "not followed"
+    }
   },
   "config": {
     "global_note": "BamDude's connection settings -- the address, the API key, the proxy headers -- are in the BamDude tab.",
@@ -230,5 +250,17 @@
     "invalid_url": "Enter an http:// or https:// address.",
     "invalid_ca": "Paste the certificate as PEM text (-----BEGIN CERTIFICATE-----).",
     "held_note": "OrcaSlicer was not asked yet for an address the plugin needs. Saving here does not ask; use \"Ask at the next start\" in the BamDude tab."
+  },
+  "track": {
+    "queued": "{file}: in the queue ({count}).",
+    "assigned": "{file}: BamDude chose {printer} ({count}).",
+    "started": "{file}: started on {printer} ({count}).",
+    "first_layer": "{file}: the first layer is done on {printer} ({count}).",
+    "completed": "{file}: finished on {printer} ({count}).",
+    "failed": "{file}: the print failed on {printer} ({count}).",
+    "cancelled": "{file}: the print was cancelled on {printer} ({count}).",
+    "unavailable": "{file}: BamDude can no longer follow a job: {reason}",
+    "ended": "{file} is no longer followed: {reason}",
+    "paused": "Following sends is paused: {reason} Open the BamDude tab to follow again."
   }
 }

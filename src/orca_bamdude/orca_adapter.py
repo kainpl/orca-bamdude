@@ -218,6 +218,8 @@ def announce(outcome: submit.Outcome, name: str, target_name: str) -> None:
         key, level = "send.refused", "Warning"
     text = RUNTIME.say(key).replace("{file}", name).replace("{target}", target_name)
     RUNTIME.notify(level, text.replace("{reason}", _reason(outcome)))
+    if outcome.result in ("accepted", "unknown"):
+        RUNTIME.track()  # its milestones are followed from now on (§9)
 
 
 def send_job(kind: str, params, update_fn, cancel_fn) -> int:
@@ -607,7 +609,7 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
 
         def run():
             rows = tab.history_rows(Journal(storage, namespace), storage, writable=writable)
-            self._post("history", rows=rows, connected=True, writable=writable)
+            self._post("history", rows=rows, connected=True, writable=writable, paused=RUNTIME.tracker.paused)
 
         _background("history", run)
 
@@ -636,7 +638,7 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
                 outcome = getattr(recovery, action)(record, client, capabilities, journal)
             announce(outcome, record.filename, "")
             rows = tab.history_rows(journal, storage, writable=writable)
-            self._post("history", rows=rows, connected=True, writable=writable)
+            self._post("history", rows=rows, connected=True, writable=writable, paused=RUNTIME.tracker.paused)
 
         _background("history", run)
 
@@ -754,6 +756,7 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
         "send": _send,
         "snapshot": _snapshot,
         "open_bamdude": _open_bamdude,
+        "track_again": lambda self, _data: (RUNTIME.track_again(), self._history()),
     }
 
 

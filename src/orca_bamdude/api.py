@@ -135,6 +135,13 @@ class ConnectorClient:
     def get(self, operation_id: str, server_id: str, epoch: str) -> tuple[int, dict]:
         return self._addressed("GET", operation_id, "", server_id, epoch)
 
+    def observe(self, operation_id: str, server_id: str, epoch: str, cursor: str | None = None) -> tuple[int, dict]:
+        """The operation with the server's observation projection (spec r2 §11 S3), one page of jobs at a time."""
+        query = {"server_id": server_id, "storage_epoch": epoch, "observations": 1}
+        if cursor:
+            query["cursor"] = cursor
+        return self.transport.request_json("GET", f"/api/v1/connector/submissions/{operation_id}", query=query)
+
     def resume(self, operation_id: str, server_id: str, epoch: str) -> tuple[int, dict]:
         return self._addressed("POST", operation_id, "/resume", server_id, epoch)
 

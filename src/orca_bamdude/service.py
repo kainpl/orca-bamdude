@@ -16,9 +16,11 @@ from .config import Connection
 from .exports import Exports
 from .fleet import Fleet, HostCallbacks
 from .journal import Journal
+from .poller import TRACKED_SECONDS
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
 from .submit import UploadGate
 from .tab import Lease
+from .tracking import Tracker
 
 NOTIFY_CAPACITY = 32
 SHUTDOWN_STAGES = ("cancel", "stop", "cleanup")
@@ -286,7 +288,48 @@ class Runtime:
         self.fleet.on_namespace = self._reconcile_namespace
         self.lease = Lease()  # "Live monitoring" (§8.2): off at every load
         self.fleet.tab_demand = self.lease.wanted
+        # Following what was sent (§9.2-§9.4): the poll scheduler's 'tracked' channel, wanted while anything is
+        # followed; the tracker classifies its own errors, so the channel never halts on one operation's.
+        self.tracker = Tracker(
+            lambda: self.fleet.send_context(),
+            lambda: self.storage,
+            self.notify,
+            names=self._printer_name,
+            say=self.say,
+        )
+        self.fleet.poller.add("tracked", TRACKED_SECONDS, self.tracker.poll, self._tracked)
+        self._tracked_generation = 0
         self._fleet_started = False
+
+    # -- following what was sent (spec r2 §9) ----------------------------------------------------------------------
+
+    def track(self) -> None:
+        """Something may be followed now (a send accepted, a start, a reconcile, new settings): asked at once."""
+        self.fleet.poller.want("tracked", True)
+        self.fleet.poller.wake("tracked")
+
+    def track_again(self) -> None:
+        """The person asks a paused tracker to follow again."""
+        self.tracker.resume()
+        self.track()
+
+    def _tracked(self, following) -> None:
+        if not following:
+            self.fleet.poller.want("tracked", False)  # nothing followed: no request until something is
+
+    def _printer_name(self, printer_id) -> str | None:
+        devices = self.fleet.devices
+        found = [d for d in devices.devices if d.printer_id == printer_id] if devices is not None else []
+        return found[0].name if found else None
+
+    def _rebind(self, snapshot) -> None:
+        """Every published snapshot to the fleet; a new generation (new settings) also lets a paused tracker
+        follow again -- reading the same settings again does not."""
+        self.fleet.rebind(snapshot)
+        if snapshot is not None and snapshot.generation > self._tracked_generation:
+            self._tracked_generation = snapshot.generation
+            self.tracker.resume()
+            self.track()
 
     # -- the journal after a restart (spec r2 §7) -------------------------------------------------------------------
 
@@ -303,6 +346,7 @@ class Runtime:
                 outcomes = recovery.reconcile_pending(Journal(storage, capabilities.namespace), client, capabilities)
                 for record, outcome in outcomes:
                     self._announce_reconciled(record.filename, outcome)
+                self.track()
             except Exception:  # noqa: BLE001 -- the records stay open; the history asks again
                 pass
             finally:
@@ -398,6 +442,7 @@ class Runtime:
         if first:
             self.on_shutdown("stop", self._stop_fleet)
             self.fleet.start()
+            self.track()  # sends of the last day are followed from the first UI entry on
         return True
 
     def _stop_fleet(self) -> None:
@@ -478,7 +523,7 @@ class Runtime:
                 self.state_writer.submit(
                     lambda s: permits.record_observation(s, changed, first, basis), self._reconsider
                 )
-        self.fleet.rebind(snapshot)  # outside the lock; an older snapshot arriving later is ignored there
+        self._rebind(snapshot)  # outside the lock; an older snapshot arriving later is ignored there
         return snapshot
 
     def _publish(self, base: Settings, current: Effective, slots: dict, blocked, revision: int) -> Snapshot:
@@ -521,7 +566,7 @@ class Runtime:
             if blocked == snapshot.blocked:
                 return
             decided = self._publish(snapshot.base, snapshot.effective, snapshot.slots, blocked, snapshot.revision)
-        self.fleet.rebind(decided)
+        self._rebind(decided)
 
     def adopt_storage(self, storage: str) -> None:
         """The host's storage folder, taken in ``on_load``, when import could not derive it."""

@@ -15,6 +15,7 @@ import json
 STEPS = ("permission", "reach", "protocol", "key", "printers", "features")
 PHASES = ("prepared", "uploading", "uploaded", "submitting", "accepted", "unknown", "finished", "upload_only")
 ACTIONS = ("reconcile", "resume", "cancel", "send_as_new")
+MILESTONES = ("queued", "assigned", "started", "first_layer", "completed", "failed", "cancelled", "unavailable")
 RIGHTS = {  # spec r2 §9.1: the right each feature needs, shown by name
     "monitor": "printers:read",
     "library_upload": "library:upload + library:read_all",
@@ -61,6 +62,9 @@ KEYS = (
     "tab.refresh",
     "tab.read_at",
     "tab.read_old",
+    "tab.tracking_paused",
+    "tab.track_again",
+    *(f"tab.milestone.{m}" for m in MILESTONES),
     "tab.writer_blocked",
     "tab.unknown",
     "tab.minutes",
@@ -286,14 +290,21 @@ function showFiles(rows) {
   });
 }
 
-function showHistory(rows, writable) {
+function showHistory(rows, writable, paused) {
   var body = el("history"); clear(body);
+  if (paused) {
+    var pause = node("tr"), cell = node("td", t("tab.tracking_paused").replace("{reason}", paused), "warn");
+    cell.appendChild(button(t("tab.track_again"), function () { send({op: "track_again"}); }));
+    pause.appendChild(cell); body.appendChild(pause);
+  }
   if (writable === false) { var note = node("tr"); note.appendChild(node("td", t("tab.writer_blocked"), "warn")); body.appendChild(note); }
   if (!rows.length) { var empty = node("tr"); empty.appendChild(node("td", t("tab.no_history"), "muted")); body.appendChild(empty); return; }
   rows.forEach(function (r) {
     var tr = node("tr");
     tr.appendChild(node("td", new Date(r.created * 1000).toLocaleString(), "muted")); tr.appendChild(node("td", r.file));
-    tr.appendChild(node("td", r.foreign ? t("tab.foreign") : t("tab.phase." + r.phase), r.phase === "unknown" || r.foreign ? "warn" : ""));
+    var phase = r.foreign ? t("tab.foreign") : t("tab.phase." + r.phase);
+    if (!r.foreign && r.milestone) { phase += " · " + t("tab.milestone." + r.milestone); }
+    tr.appendChild(node("td", phase, r.phase === "unknown" || r.foreign ? "warn" : ""));
     var cell = node("td");
     r.actions.forEach(function (a) {
       cell.appendChild(button(t("tab.action." + a), function () {
@@ -313,7 +324,7 @@ function receive(m) {
   else if (m.kind === "fleet") { showFleet(m); }
   else if (m.kind === "test") { showSteps(m.steps); }
   else if (m.kind === "exports") { showFiles(m.rows); }
-  else if (m.kind === "history") { showHistory(m.rows, m.writable); }
+  else if (m.kind === "history") { showHistory(m.rows, m.writable, m.paused); }
   else if (m.kind === "snapshot") { var img = el("shot"); img.src = m.data_url; img.hidden = false; }
   else if (m.kind === "notice") { el("notices").appendChild(node("p", t("tab.notice." + m.code), "warn")); }
   else if (m.kind === "error") { el("notices").appendChild(node("p", t("tab.error").replace("{code}", (m.op || "") + ": " + (m.code || "")), "bad")); }
