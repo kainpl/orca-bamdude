@@ -15,10 +15,12 @@ from .camera_relay import CameraRelay
 from .config import Connection
 from .fleet import Fleet, HostCallbacks
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
+from .submit import UploadGate
 
 NOTIFY_CAPACITY = 32
 SHUTDOWN_STAGES = ("cancel", "stop", "cleanup")
 STEP_DEADLINE = 2.0
+WRITER_HOST_VERSION = "2.5.0-rc"  # SoftFever_VERSION of the release the plugin was verified on (spec r2 §10)
 
 
 class LoadContext:
@@ -269,6 +271,8 @@ class Runtime:
         self._published = 0
         self._seen: dict[str, str] = {}  # this load's baseline of observed settings (H1 review R5)
         self.language = "en"
+        self.host_writable = False  # until the UI thread has read OrcaSlicer's version
+        self.upload_gate = UploadGate()  # one upload at a time for the whole plugin (§6.2 step 3)
         self.callbacks = HostCallbacks()
         self.relay = CameraRelay(
             lambda target: self.fleet.open_camera(target),
@@ -334,6 +338,11 @@ class Runtime:
     def set_language(self, code) -> None:
         """OrcaSlicer's UI language, read on the UI thread (``app_info``) and kept for every later sentence."""
         self.language = i18n.language(code)
+
+    def set_host_version(self, version) -> None:
+        """OrcaSlicer's version, read on the UI thread with the language; sending is for the one the plugin was
+        verified on (spec r2 §10): any other gets monitoring and the camera, and the tab says why."""
+        self.host_writable = version == WRITER_HOST_VERSION
 
     def say(self, key: str) -> str:
         return i18n.say(self.language, key)

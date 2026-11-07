@@ -305,6 +305,36 @@ class Host:
         agent = self.capability("BamDudePrinter")
         return self.ui.call(lambda: self.audited("BamDudePrinter", getattr(agent, method), *args))
 
+    def job_call(self, method: str, *args):
+        """A ``start_*`` as OrcaSlicer's job worker calls it (rc PrintJob/SendJob::process): audited, on the calling
+        (non-UI) thread, which the test stands in for."""
+        agent = self.capability("BamDudePrinter")
+        return self.audited("BamDudePrinter", getattr(agent, method), *args)
+
+    def window_submit(self, index: int, data) -> None:
+        """The page calls ``window.orca.submit(data)``: ``on_submit`` on the UI thread, the window closes, no
+        ``on_close`` (rc WebDialog::finish)."""
+        window = self.windows[index]
+
+        def run():
+            window["open"] = False
+            if window["on_submit"] is not None:
+                window["on_submit"](data)
+
+        self.ui.call(run)
+
+    def window_close(self, index: int) -> None:
+        """The close box or ``window.orca.close()``: ``on_close`` on the UI thread (rc WebDialog::on_close_window)."""
+        window = self.windows[index]
+
+        def run():
+            if window["open"]:
+                window["open"] = False
+                if window["on_close"] is not None:
+                    window["on_close"]()
+
+        self.ui.call(run)
+
     def select_agent(self) -> None:
         """The user picks our agent (or a preset that uses it): callbacks first, then discovery, on the UI thread."""
         host = self
@@ -540,11 +570,42 @@ class Host:
             host.preset_reads.append(bool(getattr(_local, "ui", False)))
             return bundle
 
+        def create_window(html, title="OrcaSlicer", width=820, height=600, on_message=None, on_close=None, style=0,
+                          on_submit=None):  # fmt: skip
+            # rc PluginHostUi.cpp ui_create_window: other style bits are invalid_argument (ValueError in Python); the
+            # dialog is created by CallAfter and the handle returned at once, even for a modal window.
+            if style & ~1:
+                raise ValueError("unsupported orca.host.ui.create_window style flags")
+            window = {"html": html, "title": title, "style": style, "on_submit": on_submit, "on_close": on_close,
+                      "open": False, "closed_by_plugin": False}  # fmt: skip
+            host.windows.append(window)
+            host.ui.post(lambda: window.update(open=True))
+
+            class UiWindow:
+                def post(self, data):
+                    pass
+
+                def close(self):
+                    window["closed_by_plugin"] = True
+                    host.ui.post(lambda: window.update(open=False))
+
+                def is_open(self):
+                    return window["open"]
+
+            return UiWindow()
+
+        host.windows = []
         orca.host = types.SimpleNamespace(
             plugin=types.SimpleNamespace(storage=storage),
             app_info=app_info,
             preset_bundle=preset_bundle,
-            ui=types.SimpleNamespace(push_notification=push_notification, NotificationLevel=NotificationLevel),
+            ui=types.SimpleNamespace(
+                push_notification=push_notification,
+                NotificationLevel=NotificationLevel,
+                create_window=create_window,
+                WINDOW_MODELESS=0,
+                WINDOW_MODAL=1,
+            ),
         )
         return orca
 

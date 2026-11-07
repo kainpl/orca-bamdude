@@ -20,8 +20,9 @@ from pathlib import PurePath
 
 import orca
 
-from . import __version__, locking, permits
+from . import __version__, choice_window, jobs, locking, permits, submit
 from .config import ConfigError
+from .journal import Journal
 from .service import Runtime
 from .settings import apply_edit, effective, parse_base, user_targets
 
@@ -181,11 +182,102 @@ def _preset_override():
 def refresh_settings():
     """Read base, the preset's override and the UI language, and freeze them. UI thread only (§4.3, H1 review R3)."""
     try:
-        RUNTIME.set_language(orca.host.app_info().get("language"))
-    except Exception:  # noqa: BLE001 -- English is said instead
+        info = orca.host.app_info()
+        RUNTIME.set_language(info.get("language"))
+        RUNTIME.set_host_version(info.get("version"))
+    except Exception:  # noqa: BLE001 -- English is said instead, and nothing is sent
         pass
     override, preset_name, error = _preset_override()
     return RUNTIME.apply_settings(read_base(INSTALL) or {}, override, preset_name, override_error=error)
+
+
+def _reason(outcome: submit.Outcome) -> str:
+    """The refusal in words: the server's own sentence when it gave one, else the plugin's for the code."""
+    if outcome.message:
+        return outcome.message
+    text = RUNTIME.say(f"reason.{outcome.code}")
+    return text if text != f"reason.{outcome.code}" else RUNTIME.say("reason.generic").replace("{code}", outcome.code)
+
+
+def announce(outcome: submit.Outcome, name: str, target_name: str) -> None:
+    """The send's own notification (§6.2 step 11, §9.4): Orca's dialog says nothing true about a farm."""
+    if outcome.result == "accepted" and outcome.code in ("queued", "library"):
+        key, level = f"send.{outcome.code}", "Regular"
+    elif outcome.result == "accepted":
+        key, level = "send.partial", "Warning"
+    elif outcome.result == "cancelled":
+        key, level = "send.cancelled", "Regular"
+    elif outcome.result == "unknown":
+        key, level = "send.unknown", "Warning"
+    else:
+        key, level = "send.refused", "Warning"
+    text = RUNTIME.say(key).replace("{file}", name).replace("{target}", target_name)
+    RUNTIME.notify(level, text.replace("{reason}", _reason(outcome)))
+
+
+def send_job(kind: str, params, update_fn, cancel_fn) -> int:
+    """One of Orca's Print or Send, on the host's job thread: everything that reads, copies or asks the farm runs on
+    a plugin thread (``jobs``); this thread decides only what is known now and polls (spec r2 §4.3, §6.2)."""
+    name = str(getattr(params, "project_name", "") or "plate")
+    token = RUNTIME.admit("send")
+    if token is None:
+        return ERR  # the plugin is unloading
+    context = RUNTIME.fleet.job_context(str(getattr(params, "dev_id", "")))
+    refusal = None
+    if isinstance(context, str):
+        refusal = submit.Outcome("refused", context)
+    elif RUNTIME.storage is None:
+        refusal = submit.Outcome("refused", "disk_error")
+    options, warnings = {}, ()
+    if refusal is None and kind == "print":
+        try:
+            options, warnings = submit.options_from_params(params)
+        except submit.OptionError as exc:
+            message = RUNTIME.say("reason.option").replace("{option}", RUNTIME.say(f"option.{exc.option}"))
+            refusal = submit.Outcome("refused", "option", message)
+    if refusal is not None:
+        RUNTIME.release(token)
+        announce(refusal, name, "")
+        return jobs.FAILED
+    device, client, capabilities = context
+    target = submit.Target.printer(device.printer_id, device.identity)
+    source, plate_index = str(getattr(params, "filename", "")), int(getattr(params, "plate_index", 0) or 0)
+    if kind == "print":
+        request = submit.Request.native_print(
+            source, name, target, plate_index=plate_index, options=options, warnings=warnings
+        )
+    else:
+        request = submit.Request.native_send(source, name, target, plate_index=plate_index)
+    storage = RUNTIME.storage
+
+    def work(cancel, report):
+        try:
+            outcome = submit.send(
+                request,
+                client=client,
+                capabilities=capabilities,
+                journal=Journal(storage, capabilities.namespace),
+                staging_dir=os.path.join(storage, "staging"),
+                gate=RUNTIME.upload_gate,
+                cancel=cancel,
+                choose=lambda offer: choice_window.ask(
+                    offer,
+                    orca.host.ui.create_window,
+                    orca.host.ui.WINDOW_MODAL,
+                    RUNTIME,
+                    RUNTIME.say,
+                    cancel,
+                    target_name=device.name,
+                ),  # fmt: skip
+                host_writable=RUNTIME.host_writable,
+                progress=report,
+            )
+            announce(outcome, name, device.name)
+            return outcome
+        finally:
+            RUNTIME.release(token)
+
+    return jobs.run_for_host(jobs.Job(work), update_fn, cancel_fn, RUNTIME.say)
 
 
 def _ui_entry():
@@ -292,10 +384,11 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
     def start_send_gcode_to_sdcard(self, params, update_fn, cancel_fn, wait_fn):
         if getattr(params, "project_name", "") == "verify_job":  # the access-code check: no I/O (§6.1)
             return OK
-        return ERR
+        return send_job("send", params, update_fn, cancel_fn)
 
     def start_local_print(self, params, update_fn, cancel_fn):
-        return ERR
+        """Orca's Print to a LAN printer (rc PrintJob::process, after verify_job) -- the path BamDude's devices take."""
+        return send_job("print", params, update_fn, cancel_fn)
 
     def start_print(self, params, update_fn, cancel_fn, wait_fn):
         return ERR

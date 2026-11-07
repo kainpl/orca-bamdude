@@ -453,6 +453,19 @@ class Fleet:
                 return "stale"
             return self._target
 
+    def job_context(self, device_id: str):
+        """``admit_job`` and what the job then sends with, read together: the device, this generation's client and
+        its capabilities -- or ``foreign`` / ``stale``. A rebind afterwards closes that client, so a job never goes on
+        under another connection."""
+        with self._lock:
+            if self._target is None or self._target.dev_id != device_id or not self._connected:
+                return "foreign"
+            if not self._fresh_locked():
+                return "stale"
+            if self._client is None or self._capabilities is None:
+                return "foreign"
+            return self._target, self._client, self._capabilities
+
     # -- state ---------------------------------------------------------------------------------------------------------
 
     @property
