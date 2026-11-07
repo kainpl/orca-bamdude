@@ -97,6 +97,18 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   only that order keeps an older intent or take-down from touching a newer admission of the same printer. `rebind` and `stop` close the
   client: nothing of an older generation runs on. Host callbacks are the fleet's to call from its threads, never after
   the fence.
+- `submit.py` — one send (spec r2 §6.2), host-independent, on a plugin thread: the writer gate before any I/O, the
+  staged copy, the plates Orca's gesture means, the person's `Choice`, the journal record before the first request,
+  one upload at a time (`UploadGate`), the server's `file_hash` checked against the copy, the submit written down
+  first, 202 asked about until it ends (unknown at its deadline, never "failed"), a cancel after the submit asking the
+  server to stop. `options_from_params` reads Orca's dialog codes (rc `PrintOption::getValueInt`: off 0, on 1,
+  auto 2); an unknown code is refused by name.
+- `choice_window.py` — the modal window over the staged copy (§6.3) and its `Answer`: callbacks only put and signal,
+  the first answer wins, nothing after the fence; the waiting thread closes the window on a cancel without waiting
+  for its `on_close`.
+- `jobs.py` — the host's job thread for every `start_*` (§4.3, RF-6): it polls `cancel_fn` and returns -18 at once,
+  calls `update_fn` itself (Upload stage, never Finished), and hands the host's callbacks to nothing that outlives
+  it. 0 for accepted or unconfirmed (a negative code invites a duplicate send), -1 for a refusal.
 - `i18n.py` + `locales/{en,uk}.json` — the plugin's sentences, chosen by OrcaSlicer's language code (`uk*` →
   Ukrainian).
 - `service.py` — one `Runtime` per load (capability refcount, admission before the fence, shutdown steps with

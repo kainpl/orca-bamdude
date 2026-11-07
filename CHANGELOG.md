@@ -44,5 +44,16 @@
   or another address, the earlier devices are not reused: OrcaSlicer says the printer belongs to an earlier BamDude
   connection, in English or Ukrainian as OrcaSlicer is set, and you choose it again. Without the tab open the plugin
   reads only the printer you selected, and turning the plugin off ends every request it had in flight.
+- Print and Send from OrcaSlicer to the farm. Pressing Print or Send for a BamDude printer opens a window over the
+  plugin's own copy of the sliced file -- its name, size and hash, its plates, the printer -- where you choose what
+  BamDude does: print when the queue allows, add it to the queue and start it by hand, or only put it in the library;
+  how many copies; whether BamDude chooses the filament or the external spool feeds it. Print offers the queue first;
+  Send offers the library first and queues nothing you did not tick. Bed levelling, flow and nozzle offset
+  calibration, timelapse and first layer inspection go as OrcaSlicer's dialog set them; vibration calibration is not
+  supported by BamDude and you are told so. A notification says where the file went -- the printer's queue or only
+  the library -- because OrcaSlicer's own message after Send speaks of the printer's storage. Cancel in OrcaSlicer's
+  dialog returns at once; if the farm already had the request, the plugin asks it to stop what it has not yet
+  started. An answer the farm did not give in time is reported as not yet confirmed, never as failed, so the same
+  plate is not sent twice. Sending is enabled for OrcaSlicer 2.5.0-rc.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.
