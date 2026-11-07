@@ -230,6 +230,8 @@ def foreign_records(root: str, namespace: tuple[str, str, str]) -> list[tuple[tu
 class Journal:
     def __init__(self, root: str, namespace: tuple[str, str, str], *, lock_timeout: float = LOCK_TIMEOUT):
         self.folder = os.path.join(_journal_root(root), _folder_name(namespace))
+        self.root = root
+        self.namespace = tuple(namespace)
         self._lock_timeout = lock_timeout
         os.makedirs(self.folder, exist_ok=True)
         if _read_namespace(self.folder) != tuple(namespace):
