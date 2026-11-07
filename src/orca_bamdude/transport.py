@@ -16,7 +16,9 @@
   the moment http.client's connect returns it to the end of the answer -- the TLS handshake and the body included,
   even after http.client hands a ``Connection: close`` socket to the response and forgets it -- so a close ends any of
   them, an answer read after it is not returned, and a close that landed while the socket was connecting sends
-  nothing. The name lookup and the TCP connect themselves run to their own end, bounded by the timeout.
+  nothing. The name lookup and the TCP connect themselves run to their own end: the lookup is bounded only by the
+  system resolver, and the timeout applies to each address in turn, so a host whose addresses all fail to answer
+  takes up to one timeout per address (fix3 review A1).
 """
 
 from __future__ import annotations

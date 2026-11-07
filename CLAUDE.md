@@ -60,8 +60,8 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
   transport holds each socket from the moment that connect returns it, through the TLS handshake (run by the plugin,
   on the held socket) to the end of the answer, so a close ends any of them, an answer read after it is not returned,
   a socket that connected after the close is refused unsent, and a request's end closes what was held; the name
-  lookup and the TCP connect run to their own end, bounded by the timeout. A stream already handed over stays its
-  caller's.
+  lookup (bounded only by the system resolver) and the TCP connect (the timeout per address, in turn) run to their own
+  end. A stream already handed over stays its caller's.
 - `api.py` — the connector contract on top of the transport.
 - `inspector.py` — bounded reading of a sliced `.gcode.3mf` (plates by their `index` metadata child).
 - `staging.py` — the plugin-owned hashed copy. `journal.py` — atomic per-operation records, written by revision

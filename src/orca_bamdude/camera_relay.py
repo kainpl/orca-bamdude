@@ -74,9 +74,10 @@ class RelayError(Exception):
 
 
 class _Viewer:
-    def __init__(self, target: Target, sock: socket.socket):
+    def __init__(self, target: Target, sock: socket.socket, secret: str):
         self.target = target
         self.sock = sock
+        self.secret = secret  # the address it was let in by: a rotation releases it, and nothing reopens for it
         self.upstream: Upstream | None = None
         self.released = False
 
@@ -233,8 +234,8 @@ class CameraRelay:
             with self._lock:
                 self._threads.discard(threading.current_thread())
 
-    def _resolve(self, host: str | None, raw_path: str, port: int) -> Target | None:
-        """The target this exact request addresses, or ``None``."""
+    def _resolve(self, host: str | None, raw_path: str, port: int) -> tuple[Target, str] | None:
+        """The target this exact request addresses and the secret it matched, or ``None``."""
         if host != f"{HOST}:{port}":
             return None
         parts = urlsplit(raw_path)
@@ -253,14 +254,16 @@ class CameraRelay:
             return None
         if not self._admitted(target):
             return None
-        return target
+        return target, secret
 
-    def _claim(self, target: Target, sock: socket.socket) -> _Viewer | None:
-        """Make this connection the viewer of ``target``; the previous viewer is let go."""
+    def _claim(self, target: Target, sock: socket.socket, secret: str) -> _Viewer | None:
+        """Make this connection the viewer of ``target`` -- only while the secret it came by is still the address: the
+        owner's admission is of a value a new namespace can repeat, the secret is not (fix3 review R2). The previous
+        viewer is let go."""
         with self._lock:
-            if self._stopping or self._target != target:
+            if self._stopping or self._target != target or self._secret != secret:
                 return None
-            previous, viewer = self._viewer, _Viewer(target, sock)
+            previous, viewer = self._viewer, _Viewer(target, sock, secret)
             self._viewer = viewer
         if previous is not None:
             previous.release()
@@ -292,9 +295,16 @@ class CameraRelay:
             with self._lock:
                 self._watchers.discard(threading.current_thread())
 
+    def _holds(self, viewer: _Viewer) -> bool:
+        with self._lock:
+            return self._viewer is viewer and not viewer.released and self._secret == viewer.secret
+
     def _open(self, viewer: _Viewer) -> Upstream | str:
-        """Open ``viewer``'s upstream, or return the code of why it could not be opened."""
-        if not self._admitted(viewer.target):
+        """Open ``viewer``'s upstream, or return the code of why it could not be opened.
+
+        Admission first, then the viewer's own standing: an admission granted after a rotation is a newer one, and a
+        viewer let in by the older secret is no longer the relay's -- nothing is opened for it (fix3 review R2)."""
+        if not self._admitted(viewer.target) or not self._holds(viewer):
             return "not_admitted"
         try:
             upstream = self._opener(viewer.target)
@@ -315,11 +325,12 @@ class CameraRelay:
         return upstream
 
     def _serve(self, handler: _Handler) -> None:
-        target = self._resolve(handler.headers.get("Host"), handler.path, handler.server.server_port)
-        if target is None:
+        resolved = self._resolve(handler.headers.get("Host"), handler.path, handler.server.server_port)
+        if resolved is None:
             handler.refuse(404)
             return
-        viewer = self._claim(target, handler.connection)
+        target, secret = resolved
+        viewer = self._claim(target, handler.connection, secret)
         if viewer is None:
             handler.refuse(404)
             return

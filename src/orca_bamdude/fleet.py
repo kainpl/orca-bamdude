@@ -546,12 +546,13 @@ class Fleet:
                 wake = self._target is not None and not self._connected
                 stamp = self._stamp_locked()
                 announce_stamp = self._stamp_locked(devices=self._map)
+            if refused is not None:
+                self._take_camera_down()  # decided and done under the publication lock (fix3 R1)
             if renamed:
                 self._revoke_camera_address()
         for device in announce:
             self._emit("ssdp", announce_stamp, dialect.ssdp(device, binding))
         if refused is not None:
-            self._take_camera_down()
             self._emit("local_connect", stamp, FAILED, *refused)
         self._update_wants()
         if wake:
@@ -614,11 +615,12 @@ class Fleet:
                         report = dialect.push_status(status, seq=self._seq)
                         stamp = self._stamp_locked(device, connected=True)
                         sequence = (stamp, device.dev_id, dialect.version_reply(self._firmware), report)
+                take_down = reread and (self._target is None or not self._fresh_locked())
+            if take_down:
+                self._take_camera_down()  # decided and done under the publication lock (fix3 R1)
             if renamed:
                 self._revoke_camera_address()
         if reread:
-            if self.target is None or not self.fresh:
-                self._take_camera_down()
             self._update_wants()
             self.poller.wake("printers")
             return

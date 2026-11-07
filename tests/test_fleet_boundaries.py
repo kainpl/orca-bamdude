@@ -949,3 +949,108 @@ def test_a_delayed_list_of_an_older_namespace_does_not_bring_it_back():
     finally:
         release.set()
         worker.join(4)
+
+
+# -- the fix3 review: the deliveries' take-downs (R1); a request let in by an older secret (R2) -------------------------
+
+
+@pytest.mark.parametrize("path", ["status", "list"])
+def test_a_delivery_take_down_never_takes_a_newer_camera(monkeypatch, path):
+    # Fix3 review R1 (Codex's reproduction): a delivery that decided to take the camera down is held at the take-down;
+    # a newer admission of the same printer must survive it.
+    rig, relay, _ = _camera_rig(monkeypatch)
+    delivering, errors, urls = [], [], []
+    entered, release = _pause_first(
+        rig, monkeypatch, "_take_camera_down", lambda args: threading.get_ident() in delivering
+    )
+    worker = newer = None
+    try:
+        device = rig.connected()
+        assert rig.fleet.camera_url()
+        if path == "status":
+            rig.server.statuses[1] = rig.server.status(connector_identity=OTHER)
+            answer = rig.fleet._fetch_status()
+            deliver = lambda: rig.fleet._deliver_status(answer)  # noqa: E731
+        else:  # a connect still awaits its first status when the list proves its device gone
+            rig.fleet.connect(device)
+            rig.server.epoch = "epoch-after-restore"
+            answer = rig.fleet._fetch_printers()
+            deliver = lambda: rig.fleet._deliver_printers(answer)  # noqa: E731
+
+        def old_delivery():
+            delivering.append(threading.get_ident())
+            deliver()
+
+        def new_admission():
+            try:
+                rig.server.statuses[1] = rig.server.status()
+                rig.fleet.connect(rig.device_id())
+                rig.fleet._deliver_status(rig.fleet._fetch_status())
+                urls.append(rig.fleet.camera_url())
+            except BaseException as exc:  # noqa: BLE001 -- reported below
+                errors.append(exc)
+
+        worker = threading.Thread(target=old_delivery)
+        worker.start()
+        assert entered.wait(3)
+        newer = threading.Thread(target=new_admission)
+        newer.start()
+        time.sleep(0.2)
+        release.set()
+        worker.join(3)
+        newer.join(3)
+        assert not errors and len(urls) == 1 and urls[0]
+        assert _status_of(urls[0]) == 200
+    finally:
+        release.set()
+        for thread in (worker, newer):
+            if thread is not None:
+                thread.join(4)
+        relay.stop(2)
+
+
+def test_a_request_let_in_by_an_older_secret_opens_nothing_of_a_newer_namespace(monkeypatch):
+    # Fix3 review R2 (Codex's reproduction): a request matched the old secret and waits for its admission while the
+    # namespace changes and the same printer is admitted again under a new secret; it must open nothing.
+    rig, relay, opened = _camera_rig(monkeypatch)
+    entered, release, paused, results, urls = threading.Event(), threading.Event(), [], [], []
+    admitted = relay._admitted
+
+    def admit(target):
+        if not paused:
+            paused.append(1)
+            entered.set()
+            assert release.wait(6)
+        return admitted(target)
+
+    monkeypatch.setattr(relay, "_admitted", admit)
+    worker = changer = None
+    try:
+        rig.connected()
+        old_url = rig.fleet.camera_url()
+        worker = threading.Thread(target=lambda: results.append(_status_of(old_url)))
+        worker.start()
+        assert entered.wait(3) and opened == []
+
+        def change_namespace():
+            rig.server.epoch = "epoch-after-restore"
+            rig.fleet._deliver_status(rig.fleet._fetch_status())
+            rig.fleet._deliver_printers(rig.fleet._fetch_printers())
+            rig.fleet.connect(rig.device_id())
+            rig.fleet._deliver_status(rig.fleet._fetch_status())
+            urls.append(rig.fleet.camera_url())
+
+        changer = threading.Thread(target=change_namespace)
+        changer.start()
+        changer.join(3)
+        assert len(urls) == 1 and urls[0] and urls[0] != old_url  # the change is complete before the request goes on
+        release.set()
+        worker.join(4)
+        assert results == [404] and opened == []
+        assert _status_of(urls[0]) == 200
+    finally:
+        release.set()
+        for thread in (worker, changer):
+            if thread is not None:
+                thread.join(7)
+        relay.stop(2)
