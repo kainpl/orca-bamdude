@@ -61,14 +61,14 @@
   address, the API key (kept, replaced or removed; never shown), proxy headers whose values are never shown, a
   certificate authority pasted as PEM text and the export folder. "Check the connection" goes step by step --
   OrcaSlicer's permission, reaching the server, the BamDude connector, the key, the printers, the rights -- and names
-  what is missing. The farm view reads every printer only while "Live monitoring" is on: it starts off, stays on for
-  ten minutes while you use the tab and switches itself off, saying so; "Refresh" reads once. A camera picture of a
+  what is missing. The farm view reads every printer only while "Live monitoring" is on: it starts off and switches
+  itself off, saying so, ten minutes after your last action in the tab; "Refresh" reads once. A camera picture of a
   printer, sending a file from the export folder to a printer or to the AutoQueue, the history of what was sent with
   its actions (check, go on, cancel what has not started, send as new after a confirmation) and Open BamDude are
   there too. In a printer preset's Capabilities the agent's own page edits that preset's address and CA only, with
   "Restore to global"; the key and the proxy headers always come from the tab. The tab carries BamDude's icon.
 - What you sent is followed for a day while OrcaSlicer is open: a notification when it is in the queue, when BamDude
-  chooses a printer for an AutoQueue job, when it starts, when the first layer is done, and when it finishes, fails
+  chooses a printer for an AutoQueue job, when it starts, when the first layer starts, and when it finishes, fails
   or is cancelled -- each once, also after a restart, and a print run again counts as a new run. When BamDude can no
   longer follow a job (moved to another queue, its printer outside the key's printers, the server restored), you are
   told once; when the key loses its rights or the connector is switched off, following pauses with an explanation

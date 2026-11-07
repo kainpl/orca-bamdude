@@ -21,7 +21,7 @@ its HTTP API.
   library; how many copies; filament chosen by BamDude, from the external spool, or from the AMS slots you chose in
   OrcaSlicer.
 - **What you sent is followed.** For a day, while OrcaSlicer is open: in the queue, printer chosen, printing, first
-  layer done, finished, failed or cancelled — each said once.
+  layer started, finished, failed or cancelled — each said once.
 - **The BamDude tab.** Connection settings with a step-by-step check, the farm with live monitoring and a camera
   picture, sending a file from an export folder, the history of what was sent, and Open BamDude.
 
@@ -108,8 +108,8 @@ original.
   again when OrcaSlicer starts. Check it in the tab's history rather than sending the same plate twice.
 - **The export folder** (optional): the tab lists the sliced 3MF files in it and sends one to a printer or the
   AutoQueue.
-- **Live monitoring** in the tab reads the whole farm only while it is on: it starts off, lasts ten minutes while you
-  use the tab and then switches itself off; "Refresh" reads once.
+- **Live monitoring** in the tab reads the whole farm only while it is on. It starts off and switches itself off ten
+  minutes after your last action in the tab; each action starts the ten minutes again. "Refresh" reads once.
 - **Notifications** appear on OrcaSlicer's Prepare and Preview tabs; the BamDude tab's history shows each send's last
   step.
 
