@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 
@@ -27,29 +28,34 @@ FEATURES = ("monitor", "library_upload", "submissions", "camera_stream")
 class Lease:
     def __init__(self, clock: Callable[[], float] = time.monotonic):
         self._clock = clock
+        self._lock = threading.RLock()  # the page's UI thread and the fleet's loop both ask
         self.on = False
         self._deadline = 0.0
         self._hidden = False
         self._expired = False
 
     def switch(self, on: bool) -> None:
-        self.on = bool(on)
-        self._expired = False
-        if self.on:
-            self._deadline = self._clock() + LEASE_SECONDS
+        with self._lock:
+            self.on = bool(on)
+            self._expired = False
+            if self.on:
+                self._deadline = self._clock() + LEASE_SECONDS
 
     def activity(self) -> None:
         """A click or a key on the page: renews a lease that is on, and nothing else."""
-        if self._check():
-            self._deadline = self._clock() + LEASE_SECONDS
+        with self._lock:
+            if self._check():
+                self._deadline = self._clock() + LEASE_SECONDS
 
     def pulse(self) -> None:
         """The page's heartbeat: it renews nothing (§8.2 ⟨R23⟩)."""
-        self._check()
+        with self._lock:
+            self._check()
 
     def visibility(self, *, hidden: bool) -> None:
-        self._hidden = bool(hidden)
-        self._check()
+        with self._lock:
+            self._hidden = bool(hidden)
+            self._check()
 
     def _check(self) -> bool:
         if self.on and self._clock() >= self._deadline:
@@ -58,13 +64,15 @@ class Lease:
 
     def wanted(self) -> bool:
         """Whether the tab's demand for the fleet is on now."""
-        return self._check() and not self._hidden
+        with self._lock:
+            return self._check() and not self._hidden
 
     def expired(self) -> bool:
         """True once, after the lease ran out by itself: the page says why the switch went off."""
-        self._check()
-        expired, self._expired = self._expired, False
-        return expired
+        with self._lock:
+            self._check()
+            expired, self._expired = self._expired, False
+            return expired
 
 
 def _step(name: str, ok: bool, code: str | None = None, **extra) -> dict:

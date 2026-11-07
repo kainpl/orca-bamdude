@@ -18,6 +18,7 @@ from .fleet import Fleet, HostCallbacks
 from .journal import Journal
 from .settings import Effective, Settings, effective, masked_view, origin, parse_base, slot_targets
 from .submit import UploadGate
+from .tab import Lease
 
 NOTIFY_CAPACITY = 32
 SHUTDOWN_STAGES = ("cancel", "stop", "cleanup")
@@ -283,6 +284,8 @@ class Runtime:
         )
         self.fleet = Fleet(self.callbacks, self.context, self.say, relay=self.relay)
         self.fleet.on_namespace = self._reconcile_namespace
+        self.lease = Lease()  # "Live monitoring" (§8.2): off at every load
+        self.fleet.tab_demand = self.lease.wanted
         self._fleet_started = False
 
     # -- the journal after a restart (spec r2 §7) -------------------------------------------------------------------

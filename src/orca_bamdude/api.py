@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from orca_bamdude.transport import HttpError, Stream, Transport
+from orca_bamdude.transport import HttpError, Stream, Transport, TransportError
 
 PROTOCOL_VERSION = 1
 CAMERA_FPS = 5  # spec r2 §11: the default; the server clamps further
@@ -89,6 +89,27 @@ class ConnectorClient:
             headers={"X-BamDude-Printer-Identity": identity},
             query={"fps": fps},
         )
+
+    def camera_snapshot(self, printer_id: int, identity: str, *, max_bytes: int = 4 * 1024 * 1024) -> tuple[str, bytes]:
+        """One frame of the printer's camera (the tab's snapshot, spec r2 §8.2), bounded; for the printer the identity
+        names only, as the stream is."""
+        stream = self.transport.open_stream(
+            f"/api/v1/printers/{int(printer_id)}/camera/snapshot",
+            headers={"X-BamDude-Printer-Identity": identity},
+            timeout=20.0,
+        )
+        try:
+            data = b""
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > max_bytes:
+                    raise TransportError("too_large")
+            return stream.content_type, data
+        finally:
+            stream.close()
 
     def upload(self, file_path: str, filename: str, size: int, *, progress=None, cancelled=None) -> dict:
         _status, body = self.transport.upload_file(

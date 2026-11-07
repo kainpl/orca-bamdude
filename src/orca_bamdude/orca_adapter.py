@@ -11,20 +11,25 @@ equals it, so a preset's ``printer_agent`` finds it; the tab is a separate capab
 
 from __future__ import annotations
 
+import base64
 import encodings.cp437  # noqa: F401 -- lazy stdlib codecs are imported at load, not under audit later (§4.3)
 import encodings.idna  # noqa: F401
 import json
 import os
+import subprocess
+import sys
+import threading
 import uuid
 from pathlib import PurePath
 
 import orca
 
-from . import __version__, choice_window, exports, jobs, locking, permits, submit
+from . import __version__, choice_window, exports, jobs, locking, permits, recovery, submit, tab
 from .config import ConfigError
 from .journal import Journal
 from .service import Runtime
-from .settings import apply_edit, effective, parse_base, user_targets
+from .settings import apply_edit, dashboard_url, effective, parse_base, user_targets
+from .transport import HttpError, TransportError
 
 AGENT_CAPABILITY = "BamDudePrinter"
 AGENT_NAME = "BamDude"
@@ -536,10 +541,12 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
 
     def on_load(self):
         _capabilities["page"] = self
+        RUNTIME.fleet.on_view = lambda view: self._post("fleet", **view)
         RUNTIME.attach("page")
 
     def on_unload(self):
         _capabilities.pop("page", None)
+        RUNTIME.fleet.on_view = None
         RUNTIME.detach("page")
 
     def _post(self, kind: str, **data):
@@ -552,13 +559,148 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
         """UI thread: read, decide, queue -- never wait for the state file (H1 review R4). An explicit retry is
         reported as recorded only once the state writer has written it."""
         op = data.get("op") if isinstance(data, dict) else None
-        if op == "state":
-            refresh_settings()
-            self._post("state", **RUNTIME.view())
-        elif op == "ask_again":
-            self._ask_again(saved=False)
-        elif op == "save_settings":
-            self._save_settings(data.get("edit"))
+        handler = self._HANDLERS.get(op)
+        if handler is not None:
+            handler(self, data)
+
+    # -- the handlers: the UI thread decides and queues; reads and the farm are a plugin thread's (§4.3) ------------
+
+    def _state(self, data=None):
+        refresh_settings()
+        self._post("state", **RUNTIME.view())
+
+    def _ready(self, data):
+        _ui_entry()
+        self._post("state", **RUNTIME.view())
+        self._lease()
+
+    def _lease(self, data=None):
+        expired = RUNTIME.lease.expired()
+        self._post("lease", on=RUNTIME.lease.on, expired=expired)
+
+    def _live(self, data):
+        RUNTIME.lease.switch(bool(data.get("on")))
+        self._lease()
+
+    def _activity(self, data):
+        RUNTIME.lease.activity()
+        self._lease()
+
+    def _pulse(self, data):
+        RUNTIME.lease.pulse()
+        self._lease()
+
+    def _visibility(self, data):
+        RUNTIME.lease.visibility(hidden=bool(data.get("hidden")))
+
+    def _refresh(self, data):
+        _ui_entry()
+        RUNTIME.fleet.refresh_view()
+
+    def _test(self, data):
+        refresh_settings()
+        snapshot = RUNTIME.snapshot
+        connection = snapshot.connection if snapshot is not None else None
+        blocked = snapshot.blocked if snapshot is not None else "missing"
+        _background("test", lambda: self._post("test", steps=tab.check_connection(connection, blocked=blocked)))
+
+    def _history(self, data=None):
+        context, storage = RUNTIME.fleet.send_context(), RUNTIME.storage
+        if context is None or storage is None:
+            self._post("history", rows=[], connected=False)
+            return
+        namespace = context[1].namespace
+
+        def run():
+            self._post("history", rows=tab.history_rows(Journal(storage, namespace), storage), connected=True)
+
+        _background("history", run)
+
+    def _history_action(self, data):
+        context, storage = RUNTIME.fleet.send_context(), RUNTIME.storage
+        action, operation_id = data.get("action"), str(data.get("operation_id") or "")
+        if context is None or storage is None or action not in ("reconcile", "resume", "cancel", "send_as_new"):
+            self._post("error", op="history_action", code="setup" if context is None else "action")
+            return
+        client, capabilities, _snapshot = context
+        confirmed = data.get("confirmed") is True
+
+        def run():
+            journal = Journal(storage, capabilities.namespace)
+            record = next((r for r in journal.records() if r.operation_id == operation_id), None)
+            if record is None:
+                self._post("error", op="history_action", code="record_unknown")
+                return
+            if action == "send_as_new":
+                outcome = recovery.send_as_new(record, client, capabilities, journal, confirmed=confirmed)
+            else:
+                outcome = getattr(recovery, action)(record, client, capabilities, journal)
+            announce(outcome, record.filename, "")
+            self._post("history", rows=tab.history_rows(journal, storage), connected=True)
+
+        _background("history", run)
+
+    def _exports(self, data):
+        def run():
+            rows = [
+                {"token": item.token, "relative": item.relative, "size": item.size, "modified": item.modified}
+                for item in list_exports()
+            ]
+            self._post("exports", rows=rows)
+
+        _background("exports", run)
+
+    def _send(self, data):
+        target = data.get("target") if isinstance(data.get("target"), dict) else {}
+        token = str(data.get("token") or "")
+        if target.get("kind") == "auto" and isinstance(target.get("model"), str) and target["model"]:
+            location = target.get("location_id")
+            location = location if isinstance(location, int) and not isinstance(location, bool) else None
+            chosen, name = submit.Target.auto(target["model"], location), RUNTIME.say("target.auto")
+        else:
+            device = _device(target.get("printer_id"))
+            if device is None:
+                self._post("error", op="send", code="printer_unknown")
+                return
+            chosen, name = submit.Target.printer(device.printer_id, device.identity), device.name
+        if not manual_send(token, chosen, name):
+            self._post("error", op="send", code="not_started")
+
+    def _snapshot(self, data):
+        context = RUNTIME.fleet.send_context()
+        device = _device(data.get("printer_id"))
+        if context is None or device is None or not context[1].allows("camera_snapshot"):
+            self._post("error", op="snapshot", code="not_permitted" if context is not None else "setup")
+            return
+        client = context[0]
+
+        def run():
+            try:
+                content_type, picture = client.camera_snapshot(device.printer_id, device.identity)
+            except (HttpError, TransportError) as exc:
+                code = exc.code if isinstance(exc, HttpError) else exc.kind
+                self._post("error", op="snapshot", code=code)
+                return
+            kind = content_type.split(";")[0].strip().lower()
+            if kind not in ("image/jpeg", "image/png"):
+                self._post("error", op="snapshot", code="not_a_picture")
+                return
+            data_url = "data:" + kind + ";base64," + base64.b64encode(picture).decode("ascii")
+            self._post("snapshot", printer_id=device.printer_id, data_url=data_url)
+
+        _background("snapshot", run)
+
+    def _open_bamdude(self, data):
+        """§8.5: only the exact string declared as the process target is opened; anything else waits for a start."""
+        snapshot = RUNTIME.snapshot
+        url = dashboard_url(snapshot.effective.server_url) if snapshot is not None else None
+        if not url or url not in REQUEST.get("process", []):
+            self._post("notice", code="dashboard_needs_restart")
+            return
+        try:
+            _launch(url)
+        except Exception:  # noqa: BLE001 -- refused by OrcaSlicer or the system: the page says so
+            self._post("notice", code="dashboard_refused")
 
     def _ask_again(self, saved: bool, targets=None) -> None:
         def recorded(ok: bool) -> None:  # the state writer's thread; posting to the page is safe from any thread
@@ -594,6 +736,60 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
         base = parse_base(new)
         refresh_settings()
         self._ask_again(saved=True, targets=sorted(user_targets(base, effective(base, None))))
+
+    _HANDLERS = {
+        "state": _state,
+        "ready": _ready,
+        "ask_again": lambda self, _data: self._ask_again(saved=False),
+        "save_settings": lambda self, data: self._save_settings(data.get("edit")),
+        "live": _live,
+        "activity": _activity,
+        "pulse": _pulse,
+        "visibility": _visibility,
+        "refresh": _refresh,
+        "test": _test,
+        "history": _history,
+        "history_action": _history_action,
+        "exports": _exports,
+        "send": _send,
+        "snapshot": _snapshot,
+        "open_bamdude": _open_bamdude,
+    }
+
+
+def _device(printer_id):
+    """A printer of the current list, by its BamDude number."""
+    if isinstance(printer_id, bool) or not isinstance(printer_id, int):
+        return None
+    devices = RUNTIME.fleet.devices
+    return next((d for d in devices.devices if d.printer_id == printer_id), None) if devices is not None else None
+
+
+def _background(name: str, fn) -> bool:
+    """A plugin thread for one of the tab's reads, admitted like any operation so shutdown accounts for it."""
+    token = RUNTIME.admit(name)
+    if token is None:
+        return False
+
+    def run():
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 -- the page hears nothing more; the next ask tries again
+            pass
+        finally:
+            RUNTIME.release(token)
+
+    threading.Thread(target=run, name=f"bamdude-{name}", daemon=True).start()
+    return True
+
+
+def _launch(url: str) -> None:
+    """The system's browser for the dashboard (§8.5): Windows' own opener -- whose audit target is the URL itself --
+    else ``open`` / ``xdg-open`` with an argument list, never a shell."""
+    if os.name == "nt":
+        os.startfile(url)  # noqa: S606 -- the declared process target, byte for byte
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url])  # noqa: S603
 
 
 @orca.plugin
