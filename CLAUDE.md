@@ -113,6 +113,13 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `exports.py` — the export folder (§8.4): a bounded listing (plain `.3mf`, no link, junction or reparse point) and
   one-time tokens bound to generation, folder, path, size and time; a path from the page is never taken. The tab's
   entry points are `orca_adapter.list_exports` / `manual_send`.
+- `tab.py` — the tab's own logic (§8): `Lease` (live monitoring: off at every load, ten minutes renewed only by the
+  person's actions, a minimised window pauses it), `check_connection` (the stepwise check), `fleet_rows` /
+  `history_rows` (what the page is told, field by field -- never a key, hash, body or address).
+- `ui.py` — the tab's page and the agent's config page, in OrcaSlicer's language: sentences as one escaped JSON
+  object, every text a text node. The config page serves both dialogs by `getContext().scope` (rc
+  `plugin-config-ui.js`): `global` explains, `preset` edits the override's address and CA only -- it never shows,
+  reads or saves the key or the proxy headers, which `getConfig()` there may carry.
 - `jobs.py` — the host's job thread for every `start_*` (§4.3, RF-6): it polls `cancel_fn` and returns -18 at once,
   calls `update_fn` itself (Upload stage, never Finished), and hands the host's callbacks to nothing that outlives
   it. 0 for accepted or unconfirmed (a negative code invites a duplicate send), -1 for a refusal.

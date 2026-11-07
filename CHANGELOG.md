@@ -57,5 +57,15 @@
   plate is not sent twice; when OrcaSlicer starts again the plugin asks the farm what became of it and says so. The
   AMS slots you chose in OrcaSlicer can be kept for a single plate when the printer's current state shows them;
   otherwise the window says they cannot be kept and BamDude chooses. Sending is enabled for OrcaSlicer 2.5.0-rc.
+- The BamDude tab. It shows where the connection comes from -- the tab or a printer preset -- and edits it: the
+  address, the API key (kept, replaced or removed; never shown), proxy headers whose values are never shown, a
+  certificate authority pasted as PEM text and the export folder. "Check the connection" goes step by step --
+  OrcaSlicer's permission, reaching the server, the BamDude connector, the key, the printers, the rights -- and names
+  what is missing. The farm view reads every printer only while "Live monitoring" is on: it starts off, stays on for
+  ten minutes while you use the tab and switches itself off, saying so; "Refresh" reads once. A camera picture of a
+  printer, sending a file from the export folder to a printer or to the AutoQueue, the history of what was sent with
+  its actions (check, go on, cancel what has not started, send as new after a confirmation) and Open BamDude are
+  there too. In a printer preset's Capabilities the agent's own page edits that preset's address and CA only, with
+  "Restore to global"; the key and the proxy headers always come from the tab.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.

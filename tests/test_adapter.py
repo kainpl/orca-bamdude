@@ -346,3 +346,16 @@ def test_the_agent_answers_verify_job_without_io(host):
     assert host.load()
     params = types.SimpleNamespace(project_name="verify_job", dev_id="x")
     assert host.agent_call("start_send_gcode_to_sdcard", params, None, None, None) == 0
+
+
+def test_saving_in_the_tab_changes_the_base_and_never_the_presets_override(host):
+    # spec r2 §8.1 ⟨R23-A1⟩: the tab saves base; the override belongs to the preset's own editor.
+    host.write_base(AGENT, BASE)
+    override = {"server_url": "https://farm.example:8443/lan"}
+    host.set_override(AGENT, override)
+    assert host.load()
+    ui_entry(host)
+    host.page_message({"op": "save_settings", "edit": {"export_dir": str(host.storage_dir)}})
+    assert wait_for(lambda: (host.read_base(AGENT) or {}).get("export_dir") == str(host.storage_dir))
+    (entry,) = [e for e in host.preset_overrides if e["capability"] == AGENT]
+    assert entry["cap_config"] == override
