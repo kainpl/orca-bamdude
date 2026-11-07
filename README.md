@@ -107,7 +107,8 @@ original.
 - **The AMS slots you chose in OrcaSlicer** can be kept for a single plate when the printer's current state still
   shows them; otherwise the window says so and BamDude chooses.
 - **Cancel** in OrcaSlicer's dialog returns at once; if the farm already had the request, the plugin asks it to stop
-  what has not started.
+  what has not started. Cancel in the plugin's window sends nothing; OrcaSlicer's dialog then shows its general
+  "Failed to send the print job", and the plugin's notification says the send was cancelled.
 - **An answer the farm did not give in time** is shown as *not confirmed yet*, never as a failure, and is checked
   again when OrcaSlicer starts. Check it in the tab's history rather than sending the same plate twice.
 - **The export folder** (optional): the tab lists the sliced 3MF files in it and sends one to a printer or the

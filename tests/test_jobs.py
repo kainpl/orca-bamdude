@@ -50,6 +50,23 @@ def test_a_cancel_returns_minus_18_at_once_and_signals_the_plugin_thread():
     assert len(update_calls) == returned  # nothing reaches the host's callbacks after start_* returned
 
 
+def test_a_cancel_in_the_plugins_own_window_returns_minus_1():
+    # H7 B4s/E5, owner's decision 2026-11-08: rc SendJob/PrintJob finish nothing on an ERR_CANCELED they did not
+    # cause -- the dialog stayed "Sending ... 30 %" until its own Cancel. -1 frees it; our notification says cancelled.
+    cancelled_here = Job(lambda c, r: Outcome("cancelled", "cancelled"))
+    assert run_for_host(cancelled_here, None, lambda: False, _say) == FAILED
+
+
+def test_a_cancel_orca_asked_for_as_the_send_ended_stays_minus_18():
+    asked = threading.Event()
+
+    def work(cancel, report):
+        asked.set()  # Orca's Cancel lands while the plugin thread is finishing its own cancel
+        return Outcome("cancelled", "cancelled")
+
+    assert run_for_host(Job(work), None, asked.is_set, _say, tick=0.5) == CANCELLED
+
+
 def test_a_refusal_returns_minus_1_and_an_unknown_answer_0():
     assert run_for_host(Job(lambda c, r: Outcome("refused", "x")), None, lambda: False, _say) == FAILED
     assert run_for_host(Job(lambda c, r: Outcome("unknown", "submit_unknown")), None, lambda: False, _say) == OK

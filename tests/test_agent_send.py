@@ -192,8 +192,12 @@ def test_slots_the_printer_does_not_show_are_not_kept_and_the_window_says_so(hos
     assert 'value="pinned"' not in html and 'class="warn"' in html
     host.window_close(0)
     thread.join(10)
-    assert result["code"] == -18  # a closed window is a cancel: nothing was sent
+    # A closed window is a cancel: nothing was sent. It is -1, not -18: an ERR_CANCELED Orca did not cause leaves
+    # its dialog "sending" until its own Cancel (H7, owner's decision 2026-11-08); our notification says cancelled.
+    assert result["code"] == -1
     assert farm.requests("/connector/files") == []
+    assert _notified(host, "Sending Cube_plate_2 was cancelled")
+    assert host.notifications[-1]["level"].name == "RegularNotificationLevel"
 
 
 # -- the tab's send from the export folder (spec r2 §8.4) -------------------------------------------------------------

@@ -54,7 +54,8 @@
   supported by BamDude and you are told so. A notification says where the file went -- the printer's queue or only
   the library -- because OrcaSlicer's own message after Send speaks of the printer's storage. Cancel in OrcaSlicer's
   dialog returns at once; if the farm already had the request, the plugin asks it to stop what it has not yet
-  started. An answer the farm did not give in time is reported as not yet confirmed, never as failed, so the same
+  started. Cancel in the plugin's window sends nothing and leaves OrcaSlicer's dialog free, with its general "Failed
+  to send" while the notification says the send was cancelled. An answer the farm did not give in time is reported as not yet confirmed, never as failed, so the same
   plate is not sent twice; when OrcaSlicer starts again the plugin asks the farm what became of it and says so. The
   AMS slots you chose in OrcaSlicer can be kept for a single plate when the printer's current state shows them;
   otherwise the window says they cannot be kept and BamDude chooses. Sending is enabled for OrcaSlicer 2.5.0-rc.

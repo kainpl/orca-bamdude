@@ -3,9 +3,10 @@
 OrcaSlicer runs ``start_*`` on a worker thread and, on Cancel, holds its UI thread in ``wait_for_idle`` with no
 timeout until ``start_*`` returns. So that thread only orchestrates: the send runs on a plugin thread with an event
 of its own, and the job thread polls the host's ``cancel_fn`` with a short tick -- on a Cancel it signals the event
-and returns -18 at once, waiting for nothing. ``update_fn`` (non-blocking: it queues on the host's worker) is called
-by the job thread alone, and none of the host's callbacks is ever handed to work that outlives ``start_*``: the host's
-C++ lambdas capture the job's locals by reference.
+and returns -18 at once, waiting for nothing. A cancel the person made in the plugin's own window returns -1 instead:
+rc finishes nothing on an ERR_CANCELED it did not cause (H7). ``update_fn`` (non-blocking: it queues on the host's
+worker) is called by the job thread alone, and none of the host's callbacks is ever handed to work that outlives
+``start_*``: the host's C++ lambdas capture the job's locals by reference.
 """
 
 from __future__ import annotations
@@ -62,11 +63,14 @@ def _asked_to_cancel(cancel_fn) -> bool:
         return False
 
 
-def _code(outcome: Outcome | None) -> int:
+def _code(outcome: Outcome | None, orca_cancelled: bool) -> int:
     if outcome is None or outcome.result == "refused":
         return FAILED
     if outcome.result == "cancelled":
-        return CANCELLED
+        # -18 only for Orca's own Cancel. rc SendJob/PrintJob finish nothing on an ERR_CANCELED they did not cause,
+        # so a cancel made in the plugin's window left the dialog "sending" until a second Cancel (H7; owner's
+        # decision 2026-11-08). -1 frees it -- Orca's text is its general "failed", our notification says cancelled.
+        return CANCELLED if orca_cancelled else FAILED
     # accepted, or unknown: the server most likely has it; a negative code would invite a second, duplicate send.
     # The plugin's own notification says which (spec r2 §6.2 step 11).
     return OK
@@ -82,7 +86,7 @@ def run_for_host(job: Job, update_fn, cancel_fn, say, tick: float = TICK) -> int
             return CANCELLED
         forwarded = _forward(job, update_fn, say, forwarded)
     _forward(job, update_fn, say, forwarded)
-    return _code(job.outcome)
+    return _code(job.outcome, _asked_to_cancel(cancel_fn))
 
 
 def _forward(job: Job, update_fn, say, forwarded: int) -> int:
