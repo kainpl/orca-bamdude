@@ -24,7 +24,7 @@ from pathlib import PurePath
 
 import orca
 
-from . import __version__, choice_window, exports, jobs, locking, permits, recovery, submit, tab
+from . import __version__, choice_window, exports, jobs, locking, permits, recovery, submit, tab, ui
 from .config import ConfigError
 from .journal import Journal
 from .service import Runtime
@@ -521,17 +521,16 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
         return OK
 
 
-_PAGE_HTML = """<!doctype html><meta charset="utf-8"><title>BamDude</title><body><p>BamDude</p></body>"""
-
-
 class BamDudePage(orca.pages.PagesPluginCapabilityBase):
-    """The tab. ``on_message`` runs on the UI thread and answers at once (§4.3); its HTML comes in H4."""
+    """The tab (§8). ``on_message`` runs on the UI thread and answers at once (§4.3); its page is ``ui.render``."""
 
     def get_name(self):
         return PAGE_CAPABILITY
 
     def get_ui(self):
-        return _PAGE_HTML
+        """The tab's page in OrcaSlicer's language (UI thread, at every (re)load)."""
+        refresh_settings()
+        return ui.render(RUNTIME.say)
 
     def get_default_config(self):
         return {}
