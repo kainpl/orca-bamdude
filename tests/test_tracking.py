@@ -254,3 +254,85 @@ def test_a_global_refusal_from_the_wire_pauses_once(tmp_path, status, body):
         client.close()
         server.close()
     assert tracker.paused and said == ["track.paused"] and len(server.seen) == 1
+
+
+# -- the H5 review (Codex's reproductions): the last milestone, a partial operation resumed ---------------------------
+
+from orca_bamdude.recovery import resume as _resume  # noqa: E402
+from orca_bamdude.tab import history_rows as _history_rows  # noqa: E402
+
+
+class _Script:
+    def __init__(self):
+        self.calls = []
+        self.body = {}
+
+    def observe(self, operation_id, server_id, epoch, cursor=None):
+        self.calls.append((operation_id, cursor))
+        return 200, self.body
+
+    def resume(self, operation_id, server_id, epoch):
+        return 200, self.body
+
+
+def _result(op, jobs, entries=None):
+    return {"operation_id": op, "state": "complete", "entries": entries or [{"entry_id": "e1", "state": "published"}],
+            "observations": {"jobs": jobs, "next_cursor": None}}  # fmt: skip
+
+
+def _accepted(journal):
+    record = journal.create("part.gcode.3mf", "a" * 64, origin="native", plates=[1])
+
+    def accepted(stored):
+        stored.phase = "accepted"
+        stored.body = {"operation_id": record.operation_id, "entries": [{"entry_id": "e1"}, {"entry_id": "e2"}]}
+        stored.result = {"state": "complete", "entries": [{"entry_id": "e1", "state": "published"}]}
+
+    journal.update(record.operation_id, accepted)
+    return record.operation_id
+
+
+def _tracker(root, client, said):
+    return Tracker(lambda: (client, CAPS), lambda: str(root), lambda level, text: said.append(text),
+                   names=lambda pid: "Printer", say=lambda key: key)  # fmt: skip
+
+
+def test_the_history_shows_the_last_milestone_said(tmp_path):
+    # H5 review R1: the journal's JSON sorts keys, so "the last key" is not the last milestone.
+    journal = Journal(str(tmp_path), CAPS.namespace)
+    op = _accepted(journal)
+    client, said = _Script(), []
+    follow = _tracker(tmp_path, client, said)
+    for state in ("printing", "completed"):
+        client.body = _result(op, [job("e1", "q1", state, executions=[execution("run1", state)])])
+        follow.poll()
+    (row,) = [r for r in _history_rows(journal, str(tmp_path)) if r["operation_id"] == op]
+    assert said[-1] == "track.completed" and row["milestone"] == "completed"
+
+
+def test_a_record_without_a_noted_order_invents_none(tmp_path):
+    journal = Journal(str(tmp_path), CAPS.namespace)
+    op = _accepted(journal)
+    journal.update(op, lambda r: r.milestones.update({"job:e1|q1": ["queued"], "execution:e1|q1|a1": ["started"]}))
+    (row,) = [r for r in _history_rows(journal, str(tmp_path)) if r["operation_id"] == op]
+    assert row["milestone"] is None
+
+
+def test_a_partial_operation_stays_followed_until_its_entries_are_published(tmp_path):
+    # H5 review R3: the projection holds only published entries; one finished job does not end the operation.
+    journal = Journal(str(tmp_path), CAPS.namespace)
+    op = _accepted(journal)
+    client, said = _Script(), []
+    follow = _tracker(tmp_path, client, said)
+    finished = job("e1", "q1", "completed", executions=[execution("run1", "completed")])
+    client.body = _result(op, [finished], [{"entry_id": "e1", "state": "published"},
+                                           {"entry_id": "e2", "state": "retryable_failure"}])  # fmt: skip
+    client.body["state"] = "partial"
+    journal.update(op, lambda r: setattr(r, "result", client.body))
+    follow.poll()
+    running = job("e2", "q2", "printing", executions=[execution("run2", "printing")])
+    client.body = _result(op, [finished, running], [{"entry_id": "e1", "state": "published"},
+                                                    {"entry_id": "e2", "state": "published"}])  # fmt: skip
+    assert _resume(journal.load(op), client, CAPS, journal).result == "accepted"
+    follow.poll()
+    assert len(client.calls) == 2 and "track.started" in said

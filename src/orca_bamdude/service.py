@@ -299,6 +299,7 @@ class Runtime:
         )
         self.fleet.poller.add("tracked", TRACKED_SECONDS, self.tracker.poll, self._tracked)
         self._tracked_generation = 0
+        self.on_tracking_change = None  # set by the open tab: its history is read again after a change
         self._fleet_started = False
 
     # -- following what was sent (spec r2 §9) ----------------------------------------------------------------------
@@ -316,6 +317,11 @@ class Runtime:
     def _tracked(self, following) -> None:
         if not following:
             self.fleet.poller.want("tracked", False)  # nothing followed: no request until something is
+        if self.tracker.take_changed() and self.on_tracking_change is not None:
+            try:
+                self.on_tracking_change()  # the open tab reads its history again (H5 review R2)
+            except Exception:  # noqa: BLE001 -- the tab's business; tracking goes on
+                pass
 
     def _printer_name(self, printer_id) -> str | None:
         devices = self.fleet.devices

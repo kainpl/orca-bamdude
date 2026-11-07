@@ -45,6 +45,10 @@ ADDRESSED = {
 ENDED = ("completed", "unavailable")
 WARNING = ("failed", "cancelled", "unavailable")
 DONE_IDENTITY, DONE = "*", "tracking_done"
+# The last milestone said, kept in the same record by the same locked write: the journal sorts the keys it
+# writes, so their order is no timeline (H5 review R1). A record without it has no known last milestone.
+LATEST = "latest:*"
+UNPUBLISHED = ("pending", "preparing", "processing", "retryable_failure")
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,17 @@ class Tracker:
         self._follows: dict[str, _Follow] = {}
         self._turn = 0
         self.paused: str | None = None
+        self._changed = False  # something the open history should show: a milestone, an ending, a pause
+
+    def take_changed(self) -> bool:
+        """True once after a round that said something (H5 review R2): the open tab reads its history again."""
+        with self._lock:
+            changed, self._changed = self._changed, False
+            return changed
+
+    def _mark_changed(self) -> None:
+        with self._lock:
+            self._changed = True
 
     def resume(self) -> None:
         """New settings, or the person asked to follow again: a paused tracker asks again."""
@@ -191,7 +206,13 @@ class Tracker:
         jobs = observations.get("jobs") if isinstance(observations.get("jobs"), list) else []
         self._announce(record, self._note(journal, record, candidates(jobs)))
         follow.failures = 0
-        follow.settled = follow.settled and all(_ended(job) for job in jobs)
+        # The projection holds only published entries: while the operation still has unpublished ones (a partial
+        # answer, a retryable failure, work in progress), the jobs seen so far are not all of it (H5 review R3).
+        entries = body.get("entries") if isinstance(body.get("entries"), list) else []
+        unpublished = body.get("state") == "processing" or any(
+            isinstance(entry, dict) and entry.get("state") in UNPUBLISHED for entry in entries
+        )
+        follow.settled = follow.settled and not unpublished and all(_ended(job) for job in jobs)
         next_cursor = observations.get("next_cursor")
         if isinstance(next_cursor, str) and next_cursor:
             follow.cursor = next_cursor
@@ -210,6 +231,9 @@ class Tracker:
             for event in events:
                 if stored.note_milestone(event.kind, event.identity, event.milestone):
                     new.append(event)
+            said = [event.milestone for event in new if event.milestone != DONE]
+            if said:
+                stored.milestones[LATEST] = [said[-1]]
 
         try:
             journal.update(record.operation_id, mutate)
@@ -234,17 +258,19 @@ class Tracker:
                 .replace("{reason}", reason)
             )
             self._notify("Warning" if milestone in WARNING else "Regular", text)
+            self._mark_changed()
 
     def _end(self, journal: Journal, record, code: str) -> None:
         if self._note(journal, record, [Event("job", DONE_IDENTITY, DONE)]):  # said once, by whoever noted it
             text = self._say("track.ended").replace("{file}", record.filename)
             self._notify("Warning", text.replace("{reason}", self._say(f"reason.{code}")))
+            self._mark_changed()
 
     def _pause(self, code: str) -> None:
         with self._lock:
             if self.paused:
                 return
-            self.paused = code
+            self.paused, self._changed = code, True
         self._notify("Warning", self._say("track.paused").replace("{reason}", self._say(f"reason.{code}")))
 
     @staticmethod

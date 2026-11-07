@@ -145,8 +145,8 @@ def fleet_rows(printers: list, statuses: dict) -> list[dict]:
 
 def _latest_milestone(record) -> str | None:
     """The last milestone said for the operation (§9.4: every notification has its line in the history)."""
-    said = [m for seen in record.milestones.values() for m in seen if m != "tracking_done"]
-    return said[-1] if said else None
+    seen = record.milestones.get("latest:*")  # tracking.LATEST: noted with the milestone itself
+    return seen[-1] if isinstance(seen, list) and seen else None
 
 
 def _row(record, journal: Journal, foreign: bool) -> dict:

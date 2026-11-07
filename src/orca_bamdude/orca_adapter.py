@@ -536,11 +536,13 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
     def on_load(self):
         _capabilities["page"] = self
         RUNTIME.fleet.on_view = lambda view: self._post("fleet", **view)
+        RUNTIME.on_tracking_change = self._history  # read on a plugin thread, posted to the page
         RUNTIME.attach("page")
 
     def on_unload(self):
         _capabilities.pop("page", None)
         RUNTIME.fleet.on_view = None
+        RUNTIME.on_tracking_change = None
         RUNTIME.detach("page")
 
     def _post(self, kind: str, **data):

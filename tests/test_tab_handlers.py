@@ -185,3 +185,68 @@ def test_on_an_unsupported_orcaslicer_the_history_neither_offers_nor_runs_a_writ
     finally:
         host.close()
         farm.server.close()
+
+
+# -- the H5 review R2 (Codex's reproduction): an open history hears a milestone and a pause ----------------------------
+
+
+class _LiveFarm(TabFarm):
+    def __init__(self):
+        self.observed_state = "queued"
+        super().__init__()
+
+    def route(self, method, path):
+        parsed = urlsplit(path)
+        if method == "GET" and parsed.path.startswith("/base/api/v1/connector/submissions/"):
+            if self.observed_state == "forbidden":
+                return json_answer(403, {"detail": "Not enough permissions"})
+            op = parsed.path.rsplit("/", 1)[1]
+            runs = (
+                [{"identity": "run1", "state": "printing", "first_layer": None}]
+                if self.observed_state == "printing"
+                else []
+            )
+            jobs = [
+                {
+                    "entry_id": "e1",
+                    "job": {"kind": "queue", "identity": "q1"},
+                    "state": self.observed_state,
+                    "printer": {"id": 1, "identity": "p1"},
+                    "executions": runs,
+                    "executions_complete": True,
+                }
+            ]
+            return json_answer(200, {"operation_id": op, "state": "complete",
+                                     "entries": [{"entry_id": "e1", "state": "published"}],
+                                     "observations": {"jobs": jobs, "next_cursor": None}})  # fmt: skip
+        return super().route(method, path)
+
+
+@pytest.mark.parametrize("next_state", ["printing", "forbidden"])
+def test_an_open_history_hears_a_new_milestone_and_a_pause_without_a_reload(tmp_path, next_state):
+    from orca_bamdude.journal import Journal
+
+    farm, host = _LiveFarm(), Host(tmp_path / "data")
+    try:
+        host.install()
+        host.write_base(AGENT, {"server_url": farm.server.url + "/base", "api_key": KEY})
+        journal = Journal(str(host.storage_dir), ("server-1", "epoch-1", "actor-1"))
+        record = journal.create("part.gcode.3mf", "a" * 64, origin="native", plates=[1])
+
+        def accepted(r):
+            r.phase, r.body, r.result = "accepted", {"x": 1}, {"state": "complete"}
+
+        journal.update(record.operation_id, accepted)
+        connected(host)
+        assert wait_for(lambda: len(host.notifications) > 0)
+        host.page_message({"op": "history"})
+        assert wait_for(lambda: posts(host, "history"))
+        before_history, before_notices = len(posts(host, "history")), len(host.notifications)
+        farm.observed_state = next_state
+        assert wait_for(lambda: len(host.notifications) > before_notices, timeout=16)
+        assert wait_for(lambda: len(posts(host, "history")) > before_history, timeout=3)
+        if next_state == "forbidden":  # posts arrive in their own order: one of them carries the pause
+            assert wait_for(lambda: any(p.get("paused") for p in posts(host, "history")[before_history:]), timeout=3)
+    finally:
+        host.close()
+        farm.server.close()
