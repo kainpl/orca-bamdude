@@ -212,16 +212,15 @@ def test_a_kept_camera_address_opens_nothing_once_the_device_is_stale(monkeypatc
         relay.stop(2)
 
 
-@pytest.mark.parametrize("admits", [True, False])
-def test_a_camera_address_formed_before_a_rebind_never_targets_the_new_client(monkeypatch, admits):
-    rig = Rig()
-    relay = _real_relay(rig, admits)
-    rig.connected()
+def _issue_across(rig, relay, monkeypatch, change):
+    """Pause ``camera_url`` between its decision and the relay (the H2 review's window), run ``change`` beside it, and
+    return what was issued, whether the change waited for it, and the change's thread. Since fix2 R2 the change waits:
+    the address is issued under the old namespace, and the change then revokes it."""
     entered, release = threading.Event(), threading.Event()
     set_target = relay.set_target
 
     def paused(target):
-        if target is not None:
+        if target is not None and not entered.is_set():
             entered.set()
             assert release.wait(4)
         set_target(target)
@@ -230,19 +229,32 @@ def test_a_camera_address_formed_before_a_rebind_never_targets_the_new_client(mo
     urls = []
     worker = threading.Thread(target=lambda: urls.append(rig.fleet.camera_url()))
     worker.start()
+    changer = threading.Thread(target=change)
     try:
         assert entered.wait(2)
-        rig.fleet.rebind(snapshot(2, base=NEW))
-        release.set()
-        worker.join(3)
-        assert urls == [""]
-        assert relay.target is None
-        with pytest.raises(Exception):  # noqa: B017 -- whatever the refusal, the new client is not asked
-            rig.fleet.open_camera(Target(1, IDENTITY))
-        assert not [c for c in rig.requests() if isinstance(c, tuple) and c[0] == "camera"]
+        changer.start()
+        time.sleep(0.2)
+        waited = changer.is_alive()
     finally:
         release.set()
         worker.join(3)
+        if changer.ident is not None:
+            changer.join(3)
+    assert not changer.is_alive()
+    return urls, waited
+
+
+@pytest.mark.parametrize("admits", [True, False])
+def test_a_camera_address_formed_before_a_rebind_never_targets_the_new_client(monkeypatch, admits):
+    rig = Rig()
+    relay = _real_relay(rig, admits)
+    rig.connected()
+    urls, waited = _issue_across(rig, relay, monkeypatch, lambda: rig.fleet.rebind(snapshot(2, base=NEW)))
+    assert waited and len(urls) == 1  # the rebind waited for the address being issued
+    assert relay.target is None
+    with pytest.raises(Exception):  # noqa: B017 -- whatever the refusal, the new client is not asked
+        rig.fleet.open_camera(Target(1, IDENTITY))
+    assert not [c for c in rig.requests() if isinstance(c, tuple) and c[0] == "camera"]
 
 
 def test_an_old_camera_intent_cannot_read_a_new_server_over_http(monkeypatch):
@@ -263,29 +275,14 @@ def test_an_old_camera_intent_cannot_read_a_new_server_over_http(monkeypatch):
     relay = _real_relay(rig, admits=False)
     rig.connected()
     relay.start()
-    entered, release = threading.Event(), threading.Event()
-    set_target = relay.set_target
-
-    def paused(target):
-        if target is not None:
-            entered.set()
-            assert release.wait(4)
-        set_target(target)
-
-    monkeypatch.setattr(relay, "set_target", paused)
-    urls = []
-    worker = threading.Thread(target=lambda: urls.append(rig.fleet.camera_url()))
-    worker.start()
     try:
-        assert entered.wait(2)
-        rig.fleet.rebind(snapshot(2, base=server.url))
-        release.set()
-        worker.join(3)
-        assert urls == [""] and server.seen == []
+        urls, waited = _issue_across(rig, relay, monkeypatch, lambda: rig.fleet.rebind(snapshot(2, base=server.url)))
+        assert waited and len(urls) == 1
+        if urls[0]:
+            assert _status_of(urls[0]) == 404  # issued under the old binding, revoked by the rebind
+        assert server.seen == []  # the new server is never asked for the old intent's camera
     finally:
-        release.set()
         stream_end.set()
-        worker.join(3)
         relay.stop(2)
         server.close()
 
@@ -741,3 +738,214 @@ def test_every_revocation_waits_for_a_host_call_already_admitted(change):
         pusher.join(3)
         changer.join(3)
     assert not changer.is_alive()
+
+
+# -- the fix2 review: a camera intent never spans a namespace change (R2); a delayed older list (A1) ----------------
+
+
+def _pause_first(rig, monkeypatch, name, when):
+    """Hold the first call of the fleet's or relay's ``name`` for which ``when(args)`` holds; the test releases it."""
+    owner = rig.relay if name == "set_target" else rig.fleet
+    entered, release, original = threading.Event(), threading.Event(), getattr(owner, name)
+
+    def paused(*args):
+        if not entered.is_set() and when(args):
+            entered.set()
+            assert release.wait(4)
+        return original(*args)
+
+    monkeypatch.setattr(owner, name, paused)
+    return entered, release
+
+
+def test_a_namespace_change_waits_for_a_camera_address_being_issued(monkeypatch):
+    # Fix2 review R2: an intent formed under the old namespace must not end with the new namespace's admission. The
+    # change cannot come between the intent's decision and its answer: it waits, the intent answers under the old
+    # secret, and that address dies with the change; the new namespace gets its own.
+    rig, relay, opened = _camera_rig(monkeypatch)
+    entered, release = _pause_first(rig, monkeypatch, "set_target", lambda args: args[0] is not None)
+    issued, worker, changer = [], None, None
+    try:
+        old = rig.connected()
+        worker = threading.Thread(target=lambda: issued.append(rig.fleet.camera_url()))
+        worker.start()
+        assert entered.wait(2)
+        rig.server.epoch = "epoch-after-restore"
+        answer = rig.fleet._fetch_status()
+        changer = threading.Thread(target=lambda: rig.fleet._deliver_status(answer))
+        changer.start()
+        time.sleep(0.2)
+        assert changer.is_alive()  # the change waits for the address being issued
+        release.set()
+        worker.join(3)
+        changer.join(3)
+        assert not changer.is_alive() and rig.fleet.target is None
+        (old_url,) = issued
+        rig.step()  # the list read again: the new namespace's devices
+        new = rig.device_id()
+        assert new != old
+        rig.fleet.connect(new)
+        rig.step()
+        new_url = rig.fleet.camera_url()
+        assert old_url and new_url and new_url != old_url
+        assert _status_of(old_url) == 404 and opened == []
+        assert _status_of(new_url) == 200
+    finally:
+        release.set()
+        for thread in (worker, changer):
+            if thread is not None:
+                thread.join(4)
+        relay.stop(2)
+
+
+def test_a_fence_raised_while_an_address_is_issued_issues_nothing(monkeypatch):
+    # The fence is the one change that does not take the publication lock (the unload raises it from its own thread):
+    # camera_url looks again after the relay, so an address being issued as it rises is never handed out.
+    rig, relay, opened = _camera_rig(monkeypatch)
+    entered, release = _pause_first(rig, monkeypatch, "set_target", lambda args: args[0] is not None)
+    issued, worker = [], None
+    try:
+        rig.connected()
+        worker = threading.Thread(target=lambda: issued.append(rig.fleet.camera_url()))
+        worker.start()
+        assert entered.wait(2)
+        rig.context.close()
+        release.set()
+        worker.join(3)
+        assert issued == [""] and relay.target is None and opened == []
+    finally:
+        release.set()
+        if worker is not None:
+            worker.join(4)
+        relay.stop(2)
+
+
+@pytest.mark.parametrize("change", ["connect", "disconnect"])
+def test_a_late_take_down_never_takes_a_newer_camera_admission(monkeypatch, change):
+    # A connect or disconnect takes the camera down after its state change; done outside the publication lock, a
+    # camera admitted meanwhile -- the same printer, the same target value -- would be taken down with it.
+    rig, relay, _ = _camera_rig(monkeypatch)
+    changing = []
+    entered, release = _pause_first(
+        rig, monkeypatch, "_take_camera_down", lambda args: threading.get_ident() in changing
+    )
+    issued, changer, newer = [], None, None
+    try:
+        device = rig.connected()
+        assert rig.fleet.camera_url()
+        action = (lambda: rig.fleet.connect(device)) if change == "connect" else rig.fleet.disconnect
+
+        def run():
+            changing.append(threading.get_ident())
+            action()
+
+        def reconnect():
+            if change == "disconnect":
+                rig.fleet.connect(device)
+            rig.fleet._deliver_status(rig.fleet._fetch_status())
+            issued.append(rig.fleet.camera_url())
+
+        changer = threading.Thread(target=run)
+        changer.start()
+        assert entered.wait(2)
+        newer = threading.Thread(target=reconnect)
+        newer.start()
+        time.sleep(0.2)
+        release.set()
+        changer.join(3)
+        newer.join(3)
+        (url,) = issued
+        assert url and _status_of(url) == 200
+    finally:
+        release.set()
+        for thread in (changer, newer):
+            if thread is not None:
+                thread.join(4)
+        relay.stop(2)
+
+
+def test_the_loops_take_down_never_takes_a_newer_camera_admission(monkeypatch):
+    # The loop finds the camera no longer admitted (stale) and takes it down; a camera admitted again in between --
+    # the same target value -- must survive it.
+    rig, relay, _ = _camera_rig(monkeypatch)
+    revoking, entered, release = [], threading.Event(), threading.Event()
+    admits = rig.fleet.camera_admits
+
+    def decided_then_paused(target):
+        verdict = admits(target)
+        if threading.get_ident() in revoking and not verdict and not entered.is_set():
+            entered.set()  # the loop has found it no longer admitted and is about to take it down
+            assert release.wait(4)
+        return verdict
+
+    monkeypatch.setattr(rig.fleet, "camera_admits", decided_then_paused)
+    issued, revoker, newer = [], None, None
+    try:
+        rig.connected()
+        assert rig.fleet.camera_url()
+        rig.clock.advance(STALE_SECONDS)
+
+        def revoke():
+            revoking.append(threading.get_ident())
+            rig.fleet._revoke_camera()
+
+        def fresh_again():
+            rig.fleet._deliver_status(rig.fleet._fetch_status())
+            issued.append(rig.fleet.camera_url())
+
+        revoker = threading.Thread(target=revoke)
+        revoker.start()
+        assert entered.wait(2)
+        newer = threading.Thread(target=fresh_again)
+        newer.start()
+        time.sleep(0.2)
+        release.set()
+        revoker.join(3)
+        newer.join(3)
+        (url,) = issued
+        assert url and _status_of(url) == 200
+    finally:
+        release.set()
+        for thread in (revoker, newer):
+            if thread is not None:
+                thread.join(4)
+        relay.stop(2)
+
+
+def test_a_delayed_list_of_an_older_namespace_does_not_bring_it_back():
+    # Fix2 review A1: the poller lets a read go before its answer is delivered, so a newer list can be read and
+    # delivered while an older one still waits; the era keeps the older one out (Codex's reproduction).
+    rig = Rig()
+    old = rig.connected()
+    channel = rig.fleet.poller._channels["printers"]
+    deliver, delivered = channel.deliver, []
+    entered, release = threading.Event(), threading.Event()
+
+    def delayed(value):
+        delivered.append(1)
+        if len(delivered) == 1:
+            entered.set()
+            assert release.wait(4)
+        deliver(value)
+
+    channel.deliver = delayed
+    rig.fleet.want_fleet(True)
+    rig.fleet.tick()
+    worker = threading.Thread(target=rig.jobs.queued.pop())
+    worker.start()
+    try:
+        assert entered.wait(2) and not channel.in_flight
+        rig.server.epoch = "epoch-after-restore"
+        new = rig.device_id()
+        rig.fleet.discover()
+        rig.fleet.tick()
+        rig.jobs.run_all()
+        assert rig.fleet.devices.get(new) is not None
+        rig.take()
+        release.set()
+        worker.join(3)
+        assert rig.fleet.devices.get(new) is not None and rig.fleet.devices.get(old) is None
+        assert rig.take("ssdp") == []
+    finally:
+        release.set()
+        worker.join(4)

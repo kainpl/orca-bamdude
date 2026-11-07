@@ -35,7 +35,10 @@ too: a message computed before a rebind and handed over after it is dropped. The
 the fleet's: the relay asks for it at every request, every upstream open and every renewal (``camera_admits``), the
 fleet's own ``open_camera`` asks again, and every loop step takes the relay's target down once it is no longer
 admitted -- so a kept address, a stale device, a disconnect, another binding, a lost right or the fence opens nothing
-and ends what plays.
+and ends what plays. Issuing an address (``camera_url``: decide, set the relay's target, check) and every take-down
+run under the publication lock, as every change that voids an admission does: a namespace change cannot come between
+an intent's decision and its answer, and a take-down decided on an older state cannot take a newer admission of the
+same printer with it -- the relay's target is a value, and only that order tells two equal values apart (fix2 R2).
 
 **Shutdown** (R3). ``stop`` closes the current client first -- every read in flight ends and none starts -- then the
 relay, the reads' threads and the loop, within one deadline.
@@ -307,23 +310,24 @@ class Fleet:
         hold is refused with a sentence OrcaSlicer shows as it is -- never ``"5"`` (Orca takes it for a wrong access
         code and erases it) or ``"-1"`` (it adds hints about the Bambu network plugin)."""
         refused, wake = None, None
-        with self._publication, self._lock:
-            self._access_code = access_code or ""
-            self._waiting, self._target, self._connected = None, None, False
-            self._status, self._status_at, self._reread_asked = None, None, False
-            self._camera = None
-            if self._client is None:
-                refused = self._blocked_message()
-            elif self._map is None:
-                self._waiting, self._list_once, wake = device_id, True, "printers"
-            else:
-                self._target = self._map.get(device_id)
-                if self._target is None:
-                    refused = self.say("connect.foreign")
+        with self._publication:
+            with self._lock:
+                self._access_code = access_code or ""
+                self._waiting, self._target, self._connected = None, None, False
+                self._status, self._status_at, self._reread_asked = None, None, False
+                self._camera = None
+                if self._client is None:
+                    refused = self._blocked_message()
+                elif self._map is None:
+                    self._waiting, self._list_once, wake = device_id, True, "printers"
                 else:
-                    wake = "status"
-            stamp = self._stamp_locked()
-        self._take_camera_down()
+                    self._target = self._map.get(device_id)
+                    if self._target is None:
+                        refused = self.say("connect.foreign")
+                    else:
+                        wake = "status"
+                stamp = self._stamp_locked()
+            self._take_camera_down()  # under the publication lock: never after a newer admission (fix2 R2)
         if refused is not None:
             self._emit("local_connect", stamp, FAILED, device_id, refused)
         self._update_wants()
@@ -332,11 +336,12 @@ class Fleet:
         return OK
 
     def disconnect(self) -> int:
-        with self._publication, self._lock:
-            self._waiting, self._target, self._connected = None, None, False
-            self._status, self._status_at = None, None
-            self._camera = None
-        self._take_camera_down()
+        with self._publication:
+            with self._lock:
+                self._waiting, self._target, self._connected = None, None, False
+                self._status, self._status_at = None, None
+                self._camera = None
+            self._take_camera_down()  # under the publication lock: never after a newer admission (fix2 R2)
         self._update_wants()
         return OK
 
@@ -391,19 +396,23 @@ class Fleet:
             )
 
     def camera_url(self) -> str:
-        """The relay's address for the admitted camera; otherwise empty, and the relay's target is taken down."""
-        with self._lock:
-            device = self._camera_device_locked()
-            target = Target(device.printer_id, device.identity) if device is not None else None
-            self._camera = target
-        if self.relay is None or target is None or self.context.closed:
-            self._take_camera_down()
-            return ""
-        self.relay.set_target(target)
-        if not self.camera_admits(target):  # a rebind or a loss between the decision and the relay
-            self._take_camera_down(target)
-            return ""
-        return self.relay.url_for(target) or ""
+        """The relay's address for the admitted camera; otherwise empty, and the relay's target is taken down.
+
+        Decision, relay and check are one step under the publication lock: no change that voids the admission can
+        come between them, so an intent formed under one namespace never answers with another's (fix2 R2)."""
+        with self._publication:
+            with self._lock:
+                device = self._camera_device_locked()
+                target = Target(device.printer_id, device.identity) if device is not None else None
+                self._camera = target
+            if self.relay is None or target is None or self.context.closed:
+                self._take_camera_down()
+                return ""
+            self.relay.set_target(target)
+            if not self.camera_admits(target):  # the fence, or a loss the relay's own question sees
+                self._take_camera_down(target)
+                return ""
+            return self.relay.url_for(target) or ""
 
     def _take_camera_down(self, only: Target | None = None) -> None:
         if self.relay is None:
@@ -416,12 +425,13 @@ class Fleet:
         """Every loop step: a camera no longer admitted is ended, the playing viewer with it."""
         if self.relay is None:
             return
-        current = self.relay.target
-        if current is not None and not self.camera_admits(current):
-            with self._lock:
-                if self._camera == current:
-                    self._camera = None
-            self._take_camera_down(current)
+        with self._publication:  # decided and done in one step: never after a newer admission of the same value
+            current = self.relay.target
+            if current is not None and not self.camera_admits(current):
+                with self._lock:
+                    if self._camera == current:
+                        self._camera = None
+                self._take_camera_down(current)
 
     def open_camera(self, target: Target):
         """The relay's upstream, opened by the current generation's client -- only for the admitted camera."""
