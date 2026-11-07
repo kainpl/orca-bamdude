@@ -212,7 +212,9 @@
       "held": "An earlier start did not finish asking OrcaSlicer for this address. Use \"Ask at the next start\".",
       "needs_restart": "OrcaSlicer allows this address at its next start. Restart OrcaSlicer."
     },
-    "minutes": "{n} min"
+    "minutes": "{n} min",
+    "read_old": "last read at {time}; not current",
+    "writer_blocked": "This OrcaSlicer version may not send: going on with a send or sending it again is not offered. Checking and cancelling still work."
   },
   "config": {
     "global_note": "BamDude's connection settings -- the address, the API key, the proxy headers -- are in the BamDude tab.",

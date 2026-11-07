@@ -603,8 +603,11 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
             return
         namespace = context[1].namespace
 
+        writable = RUNTIME.host_writable
+
         def run():
-            self._post("history", rows=tab.history_rows(Journal(storage, namespace), storage), connected=True)
+            rows = tab.history_rows(Journal(storage, namespace), storage, writable=writable)
+            self._post("history", rows=rows, connected=True, writable=writable)
 
         _background("history", run)
 
@@ -614,8 +617,12 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
         if context is None or storage is None or action not in ("reconcile", "resume", "cancel", "send_as_new"):
             self._post("error", op="history_action", code="setup" if context is None else "action")
             return
+        if action in tab.WRITERS and not RUNTIME.host_writable:
+            self._post("error", op="history_action", code="host_version")  # spec r2 §10 (H4 review R4)
+            return
         client, capabilities, _snapshot = context
         confirmed = data.get("confirmed") is True
+        writable = RUNTIME.host_writable
 
         def run():
             journal = Journal(storage, capabilities.namespace)
@@ -628,7 +635,8 @@ class BamDudePage(orca.pages.PagesPluginCapabilityBase):
             else:
                 outcome = getattr(recovery, action)(record, client, capabilities, journal)
             announce(outcome, record.filename, "")
-            self._post("history", rows=tab.history_rows(journal, storage), connected=True)
+            rows = tab.history_rows(journal, storage, writable=writable)
+            self._post("history", rows=rows, connected=True, writable=writable)
 
         _background("history", run)
 

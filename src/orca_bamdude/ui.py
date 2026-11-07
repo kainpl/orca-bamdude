@@ -60,6 +60,8 @@ KEYS = (
     "tab.live_expired",
     "tab.refresh",
     "tab.read_at",
+    "tab.read_old",
+    "tab.writer_blocked",
     "tab.unknown",
     "tab.minutes",
     "tab.col_name",
@@ -242,19 +244,25 @@ function showSteps(steps) {
   });
 }
 
+var STALE_SECONDS = 60, lastView = null;  // a view no read refreshed for a minute is not current (§8.2)
+function stale(view) { return Date.now() / 1000 - view.read_at > STALE_SECONDS; }
+
 function showFleet(view) {
   var body = el("fleet"); clear(body);
-  state.printers = view.rows;
+  lastView = view; state.printers = view.rows;
+  var old = stale(view);
   view.rows.forEach(function (r) {
+    var known = r.connected === true && !old;  // a printer BamDude cannot reach now, or an old read: unknown
     var tr = node("tr");
     tr.appendChild(node("td", r.name)); tr.appendChild(node("td", r.model || t("tab.unknown")));
-    tr.appendChild(node("td", r.state || t("tab.unknown")));
-    tr.appendChild(node("td", r.progress === null ? "" : Math.round(r.progress) + "%"));
-    tr.appendChild(node("td", r.remaining === null ? "" : t("tab.minutes").replace("{n}", Math.round(r.remaining / 60))));
+    tr.appendChild(node("td", known && r.state ? r.state : t("tab.unknown")));
+    tr.appendChild(node("td", !known || r.progress === null ? "" : Math.round(r.progress) + "%"));
+    // remaining_time is the printer's own mc_remaining_time: minutes already (H4 review R2)
+    tr.appendChild(node("td", !known || r.remaining === null ? "" : t("tab.minutes").replace("{n}", Math.round(r.remaining))));
     var cell = node("td"); cell.appendChild(button(t("tab.snapshot"), function () { send({op: "snapshot", printer_id: r.id}); }));
     tr.appendChild(cell); body.appendChild(tr);
   });
-  text("read-at", t("tab.read_at").replace("{time}", new Date(view.read_at * 1000).toLocaleTimeString()));
+  text("read-at", t(old ? "tab.read_old" : "tab.read_at").replace("{time}", new Date(view.read_at * 1000).toLocaleTimeString()));
   var select = el("target"), chosen = select.value; clear(select);
   view.rows.forEach(function (r) { var o = node("option", r.name); o.value = "printer:" + r.id; select.appendChild(o); });
   var aq = node("option", t("tab.autoqueue")); aq.value = "auto"; select.appendChild(aq);
@@ -278,8 +286,9 @@ function showFiles(rows) {
   });
 }
 
-function showHistory(rows) {
+function showHistory(rows, writable) {
   var body = el("history"); clear(body);
+  if (writable === false) { var note = node("tr"); note.appendChild(node("td", t("tab.writer_blocked"), "warn")); body.appendChild(note); }
   if (!rows.length) { var empty = node("tr"); empty.appendChild(node("td", t("tab.no_history"), "muted")); body.appendChild(empty); return; }
   rows.forEach(function (r) {
     var tr = node("tr");
@@ -304,7 +313,7 @@ function receive(m) {
   else if (m.kind === "fleet") { showFleet(m); }
   else if (m.kind === "test") { showSteps(m.steps); }
   else if (m.kind === "exports") { showFiles(m.rows); }
-  else if (m.kind === "history") { showHistory(m.rows); }
+  else if (m.kind === "history") { showHistory(m.rows, m.writable); }
   else if (m.kind === "snapshot") { var img = el("shot"); img.src = m.data_url; img.hidden = false; }
   else if (m.kind === "notice") { el("notices").appendChild(node("p", t("tab.notice." + m.code), "warn")); }
   else if (m.kind === "error") { el("notices").appendChild(node("p", t("tab.error").replace("{code}", (m.op || "") + ": " + (m.code || "")), "bad")); }
@@ -327,6 +336,7 @@ function activity() { var now = Date.now(); if (now - lastActivity > 5000) { las
 document.addEventListener("click", activity, true); document.addEventListener("keydown", activity, true);
 document.addEventListener("visibilitychange", function () { send({op: "visibility", hidden: document.hidden}); });
 setInterval(function () { send({op: "pulse"}); }, 15000);
+setInterval(function () { if (lastView && stale(lastView)) { showFleet(lastView); } }, 5000);
 if (window.orca && window.orca.onMessage) { window.orca.onMessage(receive); }
 send({op: "ready"}); send({op: "history"});
 </script>
@@ -404,13 +414,18 @@ if (context.scope !== "preset") {
   el("save").textContent = t("config.save"); el("restore").textContent = t("config.restore");
   el("held").hidden = !STATE.held; el("held").textContent = t("config.held_note");
   var shown = function (config) {
+    // The bridge replaces its context after a Save or a Restore (rc PluginsConfigDialog ApplyCapabilityConfig): read
+    // the one it holds now, never the one this page started with (H4 review R1).
+    var now = orca.getContext ? orca.getContext() : context;
     var c = config && typeof config === "object" ? config : {};
     var url = typeof c.server_url === "string" ? c.server_url : "", ca = typeof c.ca_pem === "string" ? c.ca_pem : "";
-    if (context.hasPresetOverride) { el("url").value = url; el("ca").value = ca; el("from-tab").textContent = ""; }
+    if (now.hasPresetOverride) { el("url").value = url; el("ca").value = ca; el("url").placeholder = ""; el("from-tab").textContent = ""; }
     else { el("url").value = ""; el("ca").value = ""; el("url").placeholder = url; el("from-tab").textContent = t("config.from_tab"); }
+    var locked = now.readOnly === true;
+    el("url").disabled = el("ca").disabled = el("save").disabled = el("restore").disabled = locked;
+    el("note").textContent = locked ? t("config.read_only") : "";
   };
   if (orca.onConfig) { orca.onConfig(shown); } else { shown(orca.getConfig ? orca.getConfig() : {}); }
-  if (context.readOnly) { el("url").disabled = el("ca").disabled = el("save").disabled = el("restore").disabled = true; el("note").textContent = t("config.read_only"); }
   el("save").onclick = function () {
     var payload = overridePayload(el("url").value, el("ca").value);
     el("problem").textContent = ""; el("saved").textContent = "";

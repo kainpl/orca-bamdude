@@ -126,6 +126,9 @@ def fleet_rows(printers: list, statuses: dict) -> list[dict]:
             continue
         status = statuses.get(printer["id"]) if isinstance(statuses, dict) else None
         status = status if isinstance(status, dict) else {}
+        if status.get("connected") is not True:
+            # BamDude keeps the last state of a printer it lost (H4 review R3): not current, so not shown as such.
+            status = {"connected": False}
         rows.append(
             {
                 "id": printer["id"],
@@ -156,8 +159,15 @@ def _row(record, journal: Journal, foreign: bool) -> dict:
     }
 
 
-def history_rows(journal: Journal, root: str, limit: int = 100) -> list[dict]:
-    """This namespace's records and every other namespace's (shown as unknown, never sent again), newest first."""
+WRITERS = ("resume", "send_as_new")  # spec r2 §10: writer functions, for the verified OrcaSlicer only
+
+
+def history_rows(journal: Journal, root: str, limit: int = 100, *, writable: bool = True) -> list[dict]:
+    """This namespace's records and every other namespace's (shown as unknown, never sent again), newest first. On an
+    OrcaSlicer the plugin may not write from, no writer action is offered (H4 review R4)."""
     mine = [_row(record, journal, False) for record in journal.records()]
+    if not writable:
+        for row in mine:
+            row["actions"] = [action for action in row["actions"] if action not in WRITERS]
     theirs = [_row(record, journal, True) for _ns, record in foreign_records(root, journal.namespace)]
     return sorted(mine + theirs, key=lambda row: row["created"], reverse=True)[:limit]

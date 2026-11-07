@@ -147,3 +147,41 @@ def test_a_dashboard_not_yet_allowed_is_not_opened(host, farm, monkeypatch):
     monkeypatch.setitem(adapter().REQUEST, "process", [])
     host.page_message({"op": "open_bamdude"})
     assert opened == [] and posts(host, "notice")[-1]["code"] == "dashboard_needs_restart"
+
+
+def test_on_an_unsupported_orcaslicer_the_history_neither_offers_nor_runs_a_writer(tmp_path):
+    # H4 review R4 (Codex's reproduction): spec r2 §10 -- resume and "send as new" are writers, for 2.5.0-rc only.
+    import uuid
+
+    from orca_bamdude.journal import Journal
+
+    farm = TabFarm()
+    host = Host(tmp_path / "data")
+    try:
+        host.install()
+        host.write_base(AGENT, {"server_url": farm.server.url + "/base", "api_key": KEY})
+        real_info = host.orca.host.app_info
+        host.orca.host.app_info = lambda: {**real_info(), "version": "2.5.1"}
+        connected(host)
+        assert adapter().RUNTIME.host_writable is False
+        journal = Journal(str(host.storage_dir), ("server-1", "epoch-1", "actor-1"))
+        record = journal.create("part.gcode.3mf", "a" * 64, origin="native", plates=[1])
+
+        def saved(r):
+            r.phase, r.library_file_id = "uploaded", 41
+            r.body = {"operation_id": r.operation_id, "entries": [{"entry_id": str(uuid.uuid4()), "plate_id": 1}]}
+
+        journal.update(record.operation_id, saved)
+        host.page_message({"op": "history"})
+        assert wait_for(lambda: posts(host, "history"))
+        history = posts(host, "history")[-1]
+        (row,) = [r for r in history["rows"] if r["operation_id"] == record.operation_id]
+        assert "resume" not in row["actions"] and "send_as_new" not in row["actions"]
+        assert history["writable"] is False
+        host.page_message({"op": "history_action", "operation_id": record.operation_id, "action": "resume"})
+        assert wait_for(lambda: posts(host, "error"))
+        assert posts(host, "error")[-1]["code"] == "host_version"
+        assert not [r for r in farm.requests("/connector/submissions") if r["method"] == "POST"]
+    finally:
+        host.close()
+        farm.server.close()
