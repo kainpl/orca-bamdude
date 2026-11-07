@@ -416,6 +416,7 @@ if (context.scope !== "preset") {
     el("problem").textContent = ""; el("saved").textContent = "";
     if (payload.server_url && !/^https?:[/][/][^ /]+/i.test(payload.server_url)) { el("problem").textContent = t("config.invalid_url"); return; }
     if (payload.ca_pem && payload.ca_pem.indexOf("-----BEGIN CERTIFICATE-----") < 0) { el("problem").textContent = t("config.invalid_ca"); return; }
+    if (!payload.server_url && !payload.ca_pem) { orca.restoreDefaults(); return; }  // nothing of its own: no override
     orca.saveConfig(payload); el("saved").textContent = t("config.saved");
   };
   el("restore").onclick = function () { orca.restoreDefaults(); el("saved").textContent = ""; };
