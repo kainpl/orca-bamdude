@@ -66,7 +66,7 @@
   printer, sending a file from the export folder to a printer or to the AutoQueue, the history of what was sent with
   its actions (check, go on, cancel what has not started, send as new after a confirmation) and Open BamDude are
   there too. In a printer preset's Capabilities the agent's own page edits that preset's address and CA only, with
-  "Restore to global"; the key and the proxy headers always come from the tab.
+  "Restore to global"; the key and the proxy headers always come from the tab. The tab carries BamDude's icon.
 - What you sent is followed for a day while OrcaSlicer is open: a notification when it is in the queue, when BamDude
   chooses a printer for an AutoQueue job, when it starts, when the first layer is done, and when it finishes, fails
   or is cancelled -- each once, also after a restart, and a print run again counts as a new run. When BamDude can no
