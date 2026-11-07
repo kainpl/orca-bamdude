@@ -126,4 +126,5 @@ def test_two_sends_of_the_same_bytes_each_keep_their_own_copy(tmp_path):
     second = stage(str(source), str(tmp_path / "staging"), 1 << 20)
     assert first.sha256 == second.sha256 and first.path != second.path
     discard(first)
-    assert open(second.path, "rb").read() == source.read_bytes()
+    with open(second.path, "rb") as handle:
+        assert handle.read() == source.read_bytes()
