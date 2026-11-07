@@ -91,6 +91,8 @@
     "tls": "the server's certificate was not accepted.",
     "redirect": "the server answered with a redirect. Enter the final address in the BamDude tab.",
     "protocol": "the server's answer was not understood.",
-    "rejected": "BamDude refused every plate. Open BamDude to see why."
+    "rejected": "BamDude refused every plate. Open BamDude to see why.",
+    "journal_busy": "the plugin's history is busy (another OrcaSlicer window may be closing). Try again in a moment.",
+    "journal": "the plugin could not write its history, so nothing was sent."
   }
 }

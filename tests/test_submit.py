@@ -460,3 +460,52 @@ def test_a_pin_orca_did_not_name_is_refused(tmp_path, env, pins, plates, filamen
     client = Client()
     outcome = env.run(request, client, choose=lambda o: Choice("queue_asap", plates, filament=filament))
     assert outcome.result == "refused" and outcome.code == "filament" and client.calls == []
+
+
+# -- the journal cannot be written (another OrcaSlicer process holds its lock): nothing goes out unrecorded -----------
+
+from orca_bamdude.journal import JournalError  # noqa: E402
+
+
+def test_a_send_the_journal_cannot_record_sends_nothing(tmp_path, env, monkeypatch):
+    def busy(*args, **kwargs):
+        raise JournalError("busy")
+
+    monkeypatch.setattr(env.journal, "create", busy)
+    client = Client()
+    outcome = env.run(_print(tmp_path), client)
+    assert outcome.result == "refused" and outcome.code == "journal_busy" and client.calls == []
+
+
+def test_a_submit_the_journal_cannot_record_first_is_not_sent(tmp_path, env, monkeypatch):
+    update = env.journal.update
+
+    def busy_at_submit(operation_id, mutate):
+        probe = type("Probe", (), {})()
+        mutate(probe)
+        if getattr(probe, "phase", None) == "submitting":
+            raise JournalError("busy")
+        return update(operation_id, mutate)
+
+    monkeypatch.setattr(env.journal, "update", busy_at_submit)
+    client = Client()
+    outcome = env.run(_print(tmp_path), client)
+    assert outcome.result == "refused" and outcome.code == "journal_busy"
+    assert [c[0] for c in client.calls] == ["upload"]  # the file is in the library; nothing was queued
+
+
+def test_an_answer_the_journal_cannot_record_is_still_the_answer(tmp_path, env, monkeypatch):
+    update = env.journal.update
+
+    def busy_after_submit(operation_id, mutate):
+        probe = type("Probe", (), {})()
+        mutate(probe)
+        if getattr(probe, "phase", None) == "accepted":
+            raise JournalError("busy")
+        return update(operation_id, mutate)
+
+    monkeypatch.setattr(env.journal, "update", busy_after_submit)
+    outcome = env.run(_print(tmp_path), Client())
+    assert outcome.result == "accepted"
+    (record,) = env.journal.records()
+    assert record.phase == "submitting"  # still pending: the history reconciles it with the server

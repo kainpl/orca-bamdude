@@ -114,3 +114,16 @@ def test_only_a_uuid_names_a_record_file(tmp_path):
 
     with pytest.raises(ValueError):
         journal.load("../../escape")
+
+
+def test_two_sends_of_the_same_bytes_each_keep_their_own_copy(tmp_path):
+    # Orca's Print and the tab may stage the same file at once; one ending must not take the other's copy.
+    from orca_bamdude.staging import discard, stage
+
+    source = tmp_path / "part.gcode.3mf"
+    source.write_bytes(b"PK" + b"x" * 100)
+    first = stage(str(source), str(tmp_path / "staging"), 1 << 20)
+    second = stage(str(source), str(tmp_path / "staging"), 1 << 20)
+    assert first.sha256 == second.sha256 and first.path != second.path
+    discard(first)
+    assert open(second.path, "rb").read() == source.read_bytes()

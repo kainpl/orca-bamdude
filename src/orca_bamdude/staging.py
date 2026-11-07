@@ -45,7 +45,7 @@ def stage(
     filename: str | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> Staged:
-    """Copy ``source`` into ``staging_dir`` as ``<sha256>.3mf`` and return it; the partial copy never survives."""
+    """Copy ``source`` into ``staging_dir`` as ``<sha256>.<token>.3mf`` (one copy per send) and return it; the partial copy never survives."""
     try:
         before = os.stat(source)
     except OSError as exc:
@@ -81,8 +81,10 @@ def stage(
         if _identity(os.stat(source)) != _identity(before) or size != before.st_size:
             raise StagingError("source_changed")
         sha = digest.hexdigest()
-        final = os.path.join(staging_dir, f"{sha}.3mf")
-        locking.replace(partial, final)  # a reader of the same bytes' copy holding it open is waited out
+        # One copy per send, even of the same bytes: Orca's Print and the tab may stage one file at once, and the
+        # end of one must not remove what the other still uploads.
+        final = os.path.join(staging_dir, f"{sha}.{uuid.uuid4().hex[:12]}.3mf")
+        locking.replace(partial, final)
     except StagingError:
         _remove(partial)
         raise

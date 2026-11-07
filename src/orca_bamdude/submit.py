@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from . import inspector, staging
 from .api import Capabilities
 from .inspector import Inspection, InspectionError
-from .journal import Journal
+from .journal import Journal, JournalError
 from .staging import Staged, StagingError
 from .transport import HttpError, TransportError
 
@@ -388,24 +388,40 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
     if refusal is not None:
         return refusal
     chosen = tuple(choice.plates) if choice.action != "library_only" else ()
-    record = journal.create(
-        staged.filename, staged.sha256, origin=request.origin, plates=chosen, target=request.target.wire()
-    )
+    try:
+        record = journal.create(
+            staged.filename, staged.sha256, origin=request.origin, plates=chosen, target=request.target.wire()
+        )
+    except JournalError as exc:
+        return _refused(_journal_code(exc))  # not written down: nothing is sent
     operation_id = record.operation_id
 
-    def note(**changes):
+    def strict(**changes):
+        """A milestone a request must not go out without: JournalError is the caller's to answer."""
+
         def mutate(stored):
             for name, value in changes.items():
                 setattr(stored, name, value)
 
         return journal.update(operation_id, mutate)
 
+    def note(**changes):
+        """A milestone after the fact: a journal busy now leaves the record behind, and the history reconciles it
+        with the server -- the answer already given is not taken back."""
+        try:
+            strict(**changes)
+        except JournalError:
+            pass
+
     def finished(result: str, code: str, message: str = "", **kwargs) -> Outcome:
         note(phase="finished", error=code)
         return Outcome(result, code, message, operation_id=operation_id, **kwargs)
 
     # -- the upload: the operation is on disk before its first request ----------------------------------------------
-    note(phase="uploading")
+    try:
+        strict(phase="uploading")
+    except JournalError as exc:
+        return _refused(_journal_code(exc), operation_id=operation_id)
     report("uploading", 0)
     try:
         with gate.slot(cancel, wait):
@@ -438,7 +454,10 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
 
     # -- the submit: written down first, so a lost answer is asked about under the same id --------------------------
     body = _body(operation_id, capabilities, file_id, staged, request, choice, options)
-    note(phase="submitting", body=body)
+    try:
+        strict(phase="submitting", body=body)
+    except JournalError as exc:
+        return _refused(_journal_code(exc), operation_id=operation_id, library_file_id=file_id)
     report("submitting", 100)
     try:
         status, result = client.submit(body)
@@ -460,6 +479,10 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
         except (HttpError, TransportError):
             continue  # asked again until the deadline; the record stays the source of truth
     return _settled(result, operation_id, file_id, note)
+
+
+def _journal_code(exc: JournalError) -> str:
+    return "journal_busy" if str(exc) == "busy" else "journal"
 
 
 def _state(result) -> str:
