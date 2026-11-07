@@ -106,6 +106,13 @@ API. User docs are `README.md` (en) and `README.uk.md` (uk); keep both in step w
 - `choice_window.py` — the modal window over the staged copy (§6.3) and its `Answer`: callbacks only put and signal,
   the first answer wins, nothing after the fence; the waiting thread closes the window on a cancel without waiting
   for its `on_close`.
+- `recovery.py` — the history's actions (§7): `reconcile` (a GET by the record's own id), `resume` (the same id:
+  the body again when the server never received it, else the server's resume), `cancel`, `send_as_new` (only
+  confirmed); 409/410 are final; another namespace's record refuses every action before any request. After a restart
+  the Runtime reconciles a namespace's open records once (`Fleet.on_namespace`), GETs only.
+- `exports.py` — the export folder (§8.4): a bounded listing (plain `.3mf`, no link, junction or reparse point) and
+  one-time tokens bound to generation, folder, path, size and time; a path from the page is never taken. The tab's
+  entry points are `orca_adapter.list_exports` / `manual_send`.
 - `jobs.py` — the host's job thread for every `start_*` (§4.3, RF-6): it polls `cancel_fn` and returns -18 at once,
   calls `update_fn` itself (Upload stage, never Finished), and hands the host's callbacks to nothing that outlives
   it. 0 for accepted or unconfirmed (a negative code invites a duplicate send), -1 for a refusal.

@@ -54,6 +54,8 @@
   the library -- because OrcaSlicer's own message after Send speaks of the printer's storage. Cancel in OrcaSlicer's
   dialog returns at once; if the farm already had the request, the plugin asks it to stop what it has not yet
   started. An answer the farm did not give in time is reported as not yet confirmed, never as failed, so the same
-  plate is not sent twice. Sending is enabled for OrcaSlicer 2.5.0-rc.
+  plate is not sent twice; when OrcaSlicer starts again the plugin asks the farm what became of it and says so. The
+  AMS slots you chose in OrcaSlicer can be kept for a single plate when the printer's current state shows them;
+  otherwise the window says they cannot be kept and BamDude chooses. Sending is enabled for OrcaSlicer 2.5.0-rc.
 - A reproducible wheel build (`tools/build_wheel.py`) and releases from `v<version>` tags: the wheel and its
   checksums are attached to each GitHub release.
