@@ -17,7 +17,7 @@ import time
 import uuid
 
 from .journal import Journal, JournalError, Record
-from .submit import Outcome
+from .submit import Outcome, uncertain
 from .transport import HttpError, TransportError
 
 FINAL_CODES = ("context_changed", "receipt_compacted")
@@ -60,8 +60,8 @@ def _update(journal: Journal, operation_id: str, **changes) -> None:
 
     try:
         journal.update(operation_id, mutate)
-    except JournalError:
-        pass  # the record stays as it was; the next look at it asks the server again
+    except (JournalError, OSError):
+        pass  # a busy lock or a full disk: the record stays as it was; the next look asks the server again
 
 
 def _settle(journal: Journal, record: Record, result, *, file_id=None) -> Outcome:
@@ -105,6 +105,9 @@ def _submit(record: Record, body: dict, client, journal: Journal) -> Outcome:
     try:
         _status, result = client.submit(body)
     except HttpError as exc:
+        if uncertain(exc):
+            _update(journal, record.operation_id, phase="unknown")
+            return Outcome("unknown", "submit_unknown", operation_id=record.operation_id)
         _update(journal, record.operation_id, phase="finished", error=exc.code)
         return Outcome("refused", exc.code, exc.message, operation_id=record.operation_id)
     except TransportError:
@@ -123,7 +126,7 @@ def resume(record: Record, client, capabilities, journal: Journal) -> Outcome:
     if record.phase == "uploaded":
         try:
             journal.update(record.operation_id, lambda stored: setattr(stored, "phase", "submitting"))
-        except JournalError as exc:
+        except (JournalError, OSError) as exc:
             return Outcome("refused", "journal_busy" if str(exc) == "busy" else "journal")
         return _submit(record, record.body, client, journal)
     try:
@@ -173,7 +176,7 @@ def send_as_new(record: Record, client, capabilities, journal: Journal, *, confi
             stored.phase, stored.body, stored.library_file_id = "submitting", body, record.library_file_id
 
         journal.update(new.operation_id, mutate)
-    except JournalError as exc:
+    except (JournalError, OSError) as exc:
         return Outcome("refused", "journal_busy" if str(exc) == "busy" else "journal")
     return _submit(new, body, client, journal)
 

@@ -509,3 +509,69 @@ def test_an_answer_the_journal_cannot_record_is_still_the_answer(tmp_path, env, 
     assert outcome.result == "accepted"
     (record,) = env.journal.records()
     assert record.phase == "submitting"  # still pending: the history reconciles it with the server
+
+
+# -- the H3 review: an answer that proves nothing is unknown, a cancel survives a lost reply, a full disk is no refusal
+
+
+@pytest.mark.parametrize("error", [HttpError(502, "http_error", ""), HttpError(504, "http_error", "")])
+def test_a_gateway_error_after_the_submit_went_out_is_unknown_not_refused(tmp_path, env, error):
+    # H3 review R1: a proxy's 502 proves nothing about the server, which may already have queued the work.
+    from orca_bamdude.recovery import actions_for
+
+    outcome = env.run(_print(tmp_path), Client(submit=error))
+    assert outcome.result == "unknown"
+    (record,) = env.journal.records()
+    assert record.phase == "unknown" and record.body is not None
+    assert actions_for(record, env.journal) == ("reconcile",)
+
+
+def test_the_servers_own_refusal_before_anything_is_still_final(tmp_path, env):
+    outcome = env.run(_print(tmp_path), Client(submit=HttpError(503, "connector_disabled", "Off")))
+    assert outcome.result == "refused" and outcome.code == "connector_disabled"
+
+
+def test_a_cancel_is_sent_even_when_the_submits_reply_is_lost(tmp_path, env):
+    # H3 review R2: the person cancelled while the submit was out, and its reply never came.
+    cancel = threading.Event()
+
+    def lost(body):
+        cancel.set()
+        raise TransportError("connect")
+
+    client = Client(submit=lost)
+    outcome = env.run(_print(tmp_path), client, cancel=cancel)
+    assert [c[0] for c in client.calls] == ["upload", "submit", "cancel"]
+    assert outcome.result == "cancelled"
+    (record,) = env.journal.records()
+    assert record.phase == "finished"
+
+
+def test_a_full_disk_when_noting_the_answer_keeps_the_answer(tmp_path, env, monkeypatch):
+    # H3 review R3: the server queued it; the journal's write of that fact failed with a plain OSError.
+    import errno
+
+    update = env.journal.update
+
+    def full_at_accepted(operation_id, mutate):
+        probe = type("Probe", (), {})()
+        mutate(probe)
+        if getattr(probe, "phase", None) == "accepted":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return update(operation_id, mutate)
+
+    monkeypatch.setattr(env.journal, "update", full_at_accepted)
+    outcome = env.run(_print(tmp_path), Client())
+    assert outcome.result == "accepted"
+    (record,) = env.journal.records()
+    assert record.phase == "submitting"
+
+
+def test_a_full_disk_before_the_upload_sends_nothing(tmp_path, env, monkeypatch):
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(env.journal, "create", full)
+    client = Client()
+    outcome = env.run(_print(tmp_path), client)
+    assert outcome.result == "refused" and outcome.code == "journal" and client.calls == []

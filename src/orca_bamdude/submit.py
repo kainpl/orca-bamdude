@@ -392,7 +392,7 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
         record = journal.create(
             staged.filename, staged.sha256, origin=request.origin, plates=chosen, target=request.target.wire()
         )
-    except JournalError as exc:
+    except (JournalError, OSError) as exc:
         return _refused(_journal_code(exc))  # not written down: nothing is sent
     operation_id = record.operation_id
 
@@ -410,8 +410,8 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
         with the server -- the answer already given is not taken back."""
         try:
             strict(**changes)
-        except JournalError:
-            pass
+        except (JournalError, OSError):
+            pass  # a busy lock or a full disk: the server's answer stands (H3 review R3)
 
     def finished(result: str, code: str, message: str = "", **kwargs) -> Outcome:
         note(phase="finished", error=code)
@@ -420,7 +420,7 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
     # -- the upload: the operation is on disk before its first request ----------------------------------------------
     try:
         strict(phase="uploading")
-    except JournalError as exc:
+    except (JournalError, OSError) as exc:
         return _refused(_journal_code(exc), operation_id=operation_id)
     report("uploading", 0)
     try:
@@ -456,14 +456,18 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
     body = _body(operation_id, capabilities, file_id, staged, request, choice, options)
     try:
         strict(phase="submitting", body=body)
-    except JournalError as exc:
+    except (JournalError, OSError) as exc:
         return _refused(_journal_code(exc), operation_id=operation_id, library_file_id=file_id)
     report("submitting", 100)
     try:
         status, result = client.submit(body)
-    except HttpError as exc:
-        return finished("refused", exc.code, exc.message, library_file_id=file_id)
-    except TransportError:
+    except (HttpError, TransportError) as exc:
+        if isinstance(exc, HttpError) and not uncertain(exc):
+            return finished("refused", exc.code, exc.message, library_file_id=file_id)
+        # The request went out and its answer proves nothing: the server may have it (H3 review R1). A cancel the
+        # person already asked for is still sent, under the same id (R2).
+        if cancel.is_set():
+            return _cancel_published(client, capabilities, operation_id, file_id, note)
         note(phase="unknown")
         return Outcome("unknown", "submit_unknown", operation_id=operation_id, library_file_id=file_id)
     end = time.monotonic() + deadline
@@ -481,8 +485,15 @@ def _staged(request, staged, client, capabilities, journal, gate, cancel, choose
     return _settled(result, operation_id, file_id, note)
 
 
-def _journal_code(exc: JournalError) -> str:
-    return "journal_busy" if str(exc) == "busy" else "journal"
+def _journal_code(exc: Exception) -> str:
+    return "journal_busy" if isinstance(exc, JournalError) and str(exc) == "busy" else "journal"
+
+
+def uncertain(exc: HttpError) -> bool:
+    """A refusal after a request went out that proves nothing about the server: a gateway's or the server's own 5xx
+    without the connector's refusal code (a proxy's 502/504, a crash mid-answer). The server may have the work, so it
+    is ``unknown`` -- asked about, never called refused (H3 review R1)."""
+    return (exc.status >= 500 and exc.code in ("http_error", "")) or exc.status == 408
 
 
 def _state(result) -> str:

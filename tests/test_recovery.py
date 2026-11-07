@@ -169,3 +169,19 @@ def test_another_namespaces_record_is_never_sent_again(tmp_path, journal):
         assert action(record, client, CAPS, journal).code == "foreign_namespace"
     assert send_as_new(record, client, CAPS, journal, confirmed=True).code == "foreign_namespace"
     assert client.calls == []
+
+
+def test_a_gateway_error_on_a_resend_is_unknown_not_final(journal):
+    record = _record(journal, "uploaded")
+    outcome = resume(record, Client({"submit": HttpError(502, "http_error", "")}), CAPS, journal)
+    assert outcome.result == "unknown" and journal.load(record.operation_id).phase == "unknown"
+
+
+def test_a_full_disk_while_recording_a_reconcile_keeps_its_answer(journal, monkeypatch):
+    record = _record(journal, "unknown")
+
+    def full(operation_id, mutate):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(journal, "update", full)
+    assert reconcile(record, Client(), CAPS, journal).result == "accepted"
