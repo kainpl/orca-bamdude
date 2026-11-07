@@ -213,5 +213,20 @@
       "needs_restart": "OrcaSlicer allows this address at its next start. Restart OrcaSlicer."
     },
     "minutes": "{n} min"
+  },
+  "config": {
+    "global_note": "BamDude's connection settings -- the address, the API key, the proxy headers -- are in the BamDude tab.",
+    "preset_heading": "BamDude for this printer preset",
+    "preset_note": "This preset may point at another address of the farm, with its own CA. The API key and the proxy headers always come from the BamDude tab: preset files are exported and synced.",
+    "server_url": "Server address for this preset",
+    "ca_pem": "Certificate authority for this preset (PEM text)",
+    "from_tab": "Empty: the BamDude tab's address and CA apply.",
+    "save": "Save",
+    "restore": "Restore to global",
+    "saved": "Saved for this preset.",
+    "read_only": "This preset cannot be changed here.",
+    "invalid_url": "Enter an http:// or https:// address.",
+    "invalid_ca": "Paste the certificate as PEM text (-----BEGIN CERTIFICATE-----).",
+    "held_note": "OrcaSlicer was not asked yet for an address the plugin needs. Saving here does not ask; use \"Ask at the next start\" in the BamDude tab."
   }
 }

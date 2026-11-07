@@ -332,3 +332,94 @@ send({op: "ready"}); send({op: "history"});
 </script>
 </body></html>
 """
+
+
+# -- the agent's config UI (§8.1 ⟨R23-A1⟩) --------------------------------------------------------------------------
+
+CONFIG_KEYS = (
+    "config.global_note",
+    "config.preset_heading",
+    "config.preset_note",
+    "config.server_url",
+    "config.ca_pem",
+    "config.from_tab",
+    "config.save",
+    "config.restore",
+    "config.saved",
+    "config.read_only",
+    "config.invalid_url",
+    "config.invalid_ca",
+    "config.held_note",
+)
+
+
+def config_ui(say, *, held: bool) -> str:
+    """One page for both of OrcaSlicer's dialogs (rc ``plugin-config-ui.js``: ``getContext().scope``). In the Plugins
+    dialog (``global``) it only explains; in a preset's Capabilities (``preset``) it edits the override's two fields --
+    the address and the CA -- with its own Save and Restore. ``getConfig()`` there is the base, key included, when no
+    override exists: the page reads only the two fields from it, as a hint, and saves only those two."""
+    texts = {key: say(key) for key in CONFIG_KEYS}
+    return _CONFIG_PAGE.replace("/*T*/", _script_json(texts)).replace("/*STATE*/", _script_json({"held": bool(held)}))
+
+
+_CONFIG_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+body{font:13px system-ui,-apple-system,"Segoe UI",sans-serif;margin:12px;color:var(--orca-fg,#1f2328);background:var(--orca-bg,transparent)}
+label{display:block;margin:8px 0 2px;opacity:.8} input,textarea{font:inherit;width:100%;box-sizing:border-box;padding:4px 6px}
+textarea{min-height:90px;font-family:ui-monospace,monospace} button{font:inherit;padding:4px 12px;margin:8px 6px 0 0}
+.muted{opacity:.75} .warn{color:#9a6700}
+</style></head>
+<body>
+<p id="note"></p>
+<div id="editor" hidden>
+<h3 id="heading"></h3><p id="preset-note" class="muted"></p>
+<label id="l-url" for="url"></label><input id="url" type="text" autocomplete="off">
+<label id="l-ca" for="ca"></label><textarea id="ca" spellcheck="false"></textarea>
+<p id="from-tab" class="muted"></p><p id="problem" class="warn"></p><p id="held" class="warn" hidden></p>
+<button id="save"></button><button id="restore"></button> <span id="saved" class="muted"></span>
+</div>
+<script>
+"use strict";
+var T = /*T*/, STATE = /*STATE*/;
+function t(key) { return Object.prototype.hasOwnProperty.call(T, key) ? T[key] : key; }
+function el(id) { return document.getElementById(id); }
+/*payload*/
+function overridePayload(url, ca) {
+  var out = {};
+  url = String(url || "").trim(); ca = String(ca || "").trim();
+  if (url) { out.server_url = url; }
+  if (ca) { out.ca_pem = ca; }
+  return out;
+}
+/*payload*/
+var orca = window.orca || {};
+var context = orca.getContext ? orca.getContext() : {scope: "global"};
+if (context.scope !== "preset") {
+  el("note").textContent = t("config.global_note");
+} else {
+  el("editor").hidden = false;
+  el("heading").textContent = t("config.preset_heading"); el("preset-note").textContent = t("config.preset_note");
+  el("l-url").textContent = t("config.server_url"); el("l-ca").textContent = t("config.ca_pem");
+  el("save").textContent = t("config.save"); el("restore").textContent = t("config.restore");
+  el("held").hidden = !STATE.held; el("held").textContent = t("config.held_note");
+  var shown = function (config) {
+    var c = config && typeof config === "object" ? config : {};
+    var url = typeof c.server_url === "string" ? c.server_url : "", ca = typeof c.ca_pem === "string" ? c.ca_pem : "";
+    if (context.hasPresetOverride) { el("url").value = url; el("ca").value = ca; el("from-tab").textContent = ""; }
+    else { el("url").value = ""; el("ca").value = ""; el("url").placeholder = url; el("from-tab").textContent = t("config.from_tab"); }
+  };
+  if (orca.onConfig) { orca.onConfig(shown); } else { shown(orca.getConfig ? orca.getConfig() : {}); }
+  if (context.readOnly) { el("url").disabled = el("ca").disabled = el("save").disabled = el("restore").disabled = true; el("note").textContent = t("config.read_only"); }
+  el("save").onclick = function () {
+    var payload = overridePayload(el("url").value, el("ca").value);
+    el("problem").textContent = ""; el("saved").textContent = "";
+    if (payload.server_url && !/^https?:[/][/][^ /]+/i.test(payload.server_url)) { el("problem").textContent = t("config.invalid_url"); return; }
+    if (payload.ca_pem && payload.ca_pem.indexOf("-----BEGIN CERTIFICATE-----") < 0) { el("problem").textContent = t("config.invalid_ca"); return; }
+    orca.saveConfig(payload); el("saved").textContent = t("config.saved");
+  };
+  el("restore").onclick = function () { orca.restoreDefaults(); el("saved").textContent = ""; };
+}
+</script>
+</body></html>
+"""

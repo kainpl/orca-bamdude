@@ -367,14 +367,6 @@ def _take_storage() -> None:
     RUNTIME.adopt_storage(storage)
 
 
-_CONFIG_UI = """<!doctype html><meta charset="utf-8"><body><p id="msg"></p><script>
-var scope = (window.orca && window.orca.getContext) ? window.orca.getContext().scope : "global";
-document.getElementById("msg").textContent = scope === "preset"
-  ? "The BamDude connection for this preset is set in the BamDude tab."
-  : "BamDude connection settings are in the BamDude tab.";
-</script></body>"""
-
-
 class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
     """The printer agent: discovery, connection, reports and the camera through the Runtime's fleet (§5); jobs come
     in H3. Every method returns at once on the UI thread -- what needs the farm is answered by the fleet's thread
@@ -397,7 +389,8 @@ class BamDudeAgent(orca.printer_agent.PrinterAgentBase):
         return True
 
     def get_config_ui(self):
-        return _CONFIG_UI
+        """One page for the Plugins dialog and a preset's Capabilities (§8.1 ⟨R23-A1⟩), in OrcaSlicer's language."""
+        return ui.config_ui(RUNTIME.say, held=bool(RUNTIME.held()))
 
     def on_load(self):
         # OrcaSlicer's load thread, not the UI thread: no preset is read here; the first UI entry takes the snapshot,
