@@ -7,13 +7,16 @@
   protocol error, never shown. An error's text is the server's ``detail.message`` at most -- never a raw body,
   a header, the key or a stack.
 - Every call has a timeout. An upload streams a file in chunks and can be cancelled between chunks.
-- ``close()`` is the owner's cancel (H2 review R3, fix review F1). The transport makes each connection's socket
-  itself and holds it from before it connects to the end of the answer -- the TCP connect, the TLS handshake and the
-  body included, even after http.client hands a ``Connection: close`` socket to the response and forgets it -- so a
-  close ends any of them, and an answer read after it is not returned.
-- It connects by the configured host name, not by an address it resolved, and raises ``http.client.connect`` as
-  http.client does: OrcaSlicer's audit matches a ``socket.connect`` made outside http.client's own frames against its
-  target (rc PluginAuditManager), so the target stays the host the user granted.
+- The connect is http.client's own (``HTTPConnection.connect``: every address of every family, in the resolver's
+  order). OrcaSlicer's audit covers a ``socket.connect`` only inside a stdlib frame that raised a granted
+  ``http.client.connect``, with nothing but stdlib frames between (rc PluginAuditManager ``record_root_frame``,
+  ``covered_by_root_frame``); a connect made from plugin code is judged on its own target, a resolved address the
+  user never granted. So the plugin neither makes nor connects a socket itself (fix2 review R3).
+- ``close()`` is the owner's cancel (H2 review R3, fix review F1). The transport holds each connection's socket from
+  the moment http.client's connect returns it to the end of the answer -- the TLS handshake and the body included,
+  even after http.client hands a ``Connection: close`` socket to the response and forgets it -- so a close ends any of
+  them, an answer read after it is not returned, and a close that landed while the socket was connecting sends
+  nothing. The name lookup and the TCP connect themselves run to their own end, bounded by the timeout.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ import json
 import os
 import socket
 import ssl
-import sys
 import threading
 from collections.abc import Callable, Iterable
 from urllib.parse import urlencode, urlsplit
@@ -96,64 +98,31 @@ class Transport:
         self._base_path = parts.path
         self._context = _ssl_context(connection.ca_pem) if parts.scheme == "https" else None
         self._lock = threading.Lock()
-        # Each request's connection and the socket it is on now: held from before the socket connects to the end of
-        # the answer, whatever http.client does with its own reference (H2 fix review F1).
+        # Each request's connection and the socket it is on now: held from the moment http.client's connect returns
+        # it to the end of the answer, whatever http.client does with its own reference (H2 fix review F1).
         self._live: dict[http.client.HTTPConnection, socket.socket | None] = {}
         self._closed = False
 
     # ------------------------------------------------------------------ the owner's cancel (H2 review R3, F1)
 
     def close(self) -> None:
-        """End every request in flight -- connecting, in its TLS handshake, waiting for or reading its answer -- and
-        refuse every new one with ``cancelled``: the owner's unload or a new connection generation. A stream already
-        handed to its caller is the caller's to close."""
+        """End every request in flight -- in its TLS handshake, waiting for or reading its answer -- and refuse every
+        new one with ``cancelled``: the owner's unload or a new connection generation. A request still connecting
+        sends nothing once its connect returns. A stream already handed to its caller is the caller's to close."""
         with self._lock:
             self._closed = True
             held = [sock for sock in self._live.values() if sock is not None]
         for sock in held:
             _abort(sock)
 
-    def _hold(self, conn: http.client.HTTPConnection, sock: socket.socket | None) -> None:
-        """Under the lock: ``sock`` is the one ``close`` ends for ``conn`` now; refused once closed."""
+    def _hold(self, conn: http.client.HTTPConnection, sock: socket.socket) -> None:
+        """Under the lock: ``sock`` is the one ``close`` ends for ``conn`` now; refused, and closed, once closed."""
         with self._lock:
             if not self._closed:
                 self._live[conn] = sock
                 return
-        if sock is not None:
-            sock.close()
+        sock.close()
         raise TransportError("cancelled")
-
-    def _dial(self, conn: http.client.HTTPConnection, tls: bool) -> socket.socket:
-        """The socket of ``conn``, made and held by the transport before it connects (see the module text)."""
-        sys.audit("http.client.connect", conn, conn.host, conn.port)  # what http.client.connect raises
-        families: list[int] = []
-        for family, _kind, _proto, _name, _address in socket.getaddrinfo(conn.host, conn.port, 0, socket.SOCK_STREAM):
-            if family not in families:
-                families.append(family)
-        error: OSError | None = None
-        sock = None
-        for family in families:
-            sock = socket.socket(family, socket.SOCK_STREAM)
-            self._hold(conn, sock)
-            try:
-                sock.settimeout(conn.timeout)
-                sock.connect((conn.host, conn.port))  # by name: the audited target is the host the user granted
-                break
-            except OSError as exc:
-                error, sock = exc, None
-                self._hold(conn, None)
-        if sock is None:
-            raise error or OSError("no address")
-        try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except OSError:
-            pass
-        if not tls:
-            return sock
-        secure = self._context.wrap_socket(sock, server_hostname=conn.host, do_handshake_on_connect=False)
-        self._hold(conn, secure)  # the descriptor is the TLS socket's now
-        secure.do_handshake()
-        return secure
 
     @property
     def closed(self) -> bool:
@@ -165,7 +134,8 @@ class Transport:
         return TransportError("cancelled" if self.closed else kind)
 
     def _connect(self, conn: http.client.HTTPConnection) -> None:
-        """Connect before anything is sent, then look again: a transport closed meanwhile sends nothing."""
+        """Connect before anything is sent; a transport closed meanwhile refuses the socket the connect returned
+        (``_hold``), so nothing is sent."""
         try:
             conn.connect()
         except ssl.SSLError as exc:
@@ -174,13 +144,15 @@ class Transport:
             raise self._failure("timeout") from exc
         except (ConnectionError, OSError, http.client.HTTPException) as exc:
             raise self._failure("connect") from exc
-        if self.closed:
-            raise TransportError("cancelled")
 
     def _forget(self, conn: http.client.HTTPConnection) -> None:
+        """The request is over: its connection and the socket held for it are closed, whatever stage it ended in.
+        One socket object owns the descriptor (a TLS wrap detaches the plain one), and closing it twice is nothing."""
         with self._lock:
-            self._live.pop(conn, None)
+            held = self._live.pop(conn, None)
         conn.close()
+        if held is not None:
+            held.close()
 
     def _done(self, value):
         """An answer read in full is returned only while the transport is open: after close it is no answer."""
@@ -350,25 +322,33 @@ class Transport:
 
 
 class _Connection(http.client.HTTPConnection):
-    """An http.client connection whose socket the transport makes and holds (``Transport._dial``)."""
+    """An http.client connection whose socket the transport holds from the moment http.client's connect returns."""
 
     def __init__(self, transport: Transport, host, port, timeout):
         super().__init__(host, port, timeout=timeout)
         self._transport = transport
 
     def connect(self) -> None:
-        self.sock = self._transport._dial(self, tls=False)
+        super().connect()  # http.client's own: the audit's covered root (see the module text)
+        self._transport._hold(self, self.sock)
 
 
 class _TLSConnection(http.client.HTTPSConnection):
-    """The TLS one: the handshake runs on a socket the transport already holds."""
+    """The TLS one: http.client's TCP connect, then the handshake on a socket the transport already holds."""
 
     def __init__(self, transport: Transport, host, port, timeout, context):
         super().__init__(host, port, timeout=timeout, context=context)
         self._transport = transport
 
     def connect(self) -> None:
-        self.sock = self._transport._dial(self, tls=True)
+        http.client.HTTPConnection.connect(self)  # the TCP connect only; HTTPSConnection's would also handshake
+        # The wrap detaches the plain socket: the TLS socket owns the descriptor from here, and the transport holds it
+        # before the handshake -- a close ends the handshake, and a failed one is closed with the request (``_forget``,
+        # fix2 review R1), whatever the error's traceback keeps.
+        secure = self._context.wrap_socket(self.sock, server_hostname=self.host, do_handshake_on_connect=False)
+        self._transport._hold(self, secure)
+        secure.do_handshake()
+        self.sock = secure
 
 
 class Stream:
