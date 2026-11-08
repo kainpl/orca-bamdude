@@ -215,6 +215,9 @@ class Transport:
             raise TransportError("redirect")
         try:
             raw = _read_bounded(response, MAX_JSON_RESPONSE)
+        except TransportError as exc:
+            # On POSIX close() wakes the read through shutdown(), so it ends short: after a close that is the cancel.
+            raise self._failure(exc.kind) from exc
         except TimeoutError as exc:
             raise self._failure("timeout") from exc
         except (ConnectionError, OSError, http.client.HTTPException) as exc:

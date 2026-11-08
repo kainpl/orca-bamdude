@@ -84,6 +84,31 @@ def test_an_oversized_answer_is_refused(serve):
     assert refused.value.kind == "too_large"
 
 
+class _ShortAnswer:
+    """A 200 whose body ended before its Content-Length: what ``read(n)`` leaves when the connection ends early."""
+
+    status = 200
+    length = 40  # still promised when the bytes stopped
+
+    def read(self, amt=None):
+        return b'{"id"'
+
+    def getheader(self, name, default=None):
+        return {"Content-Type": "application/json"}.get(name, default)
+
+
+@pytest.mark.parametrize("closed, kind", [(False, "incomplete"), (True, "cancelled")])
+def test_a_cut_off_answer_after_the_owner_closed_the_transport_is_its_cancel(closed, kind):
+    # On Linux and macOS close() wakes a body read through shutdown(): the read ends early, as a dropped connection
+    # does. Once the owner closed the transport that is its cancel, never "incomplete" (CI, 2026-11-08).
+    transport = Transport(Connection.build("http://127.0.0.1:9", "bd_synthetic"), timeout=1)
+    if closed:
+        transport.close()
+    with pytest.raises(TransportError) as refused:
+        transport._json(_ShortAnswer())
+    assert refused.value.kind == kind
+
+
 @pytest.mark.parametrize("body", [b"", b'{"id": 7, "fi'])
 @pytest.mark.parametrize("call", ["request", "upload"])
 def test_an_answer_cut_off_before_its_length_is_incomplete_not_an_empty_success(call, body, tmp_path):
