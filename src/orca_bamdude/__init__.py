@@ -5,7 +5,7 @@ OrcaSlicer. The host adapter (printer agent, tab, camera relay wiring) imports `
 ``orca`` exists: inside OrcaSlicer, or a test's fake of it.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0b1"
 
 try:
     import orca  # noqa: F401 -- present only inside OrcaSlicer (or a test's fake)

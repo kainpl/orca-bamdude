@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.0b1] - 2026-11-08
+
+The first pre-release: OrcaBamDude sends plates from OrcaSlicer 2.5.0-rc to a BamDude farm and shows its printers. It
+needs a BamDude server with the slicer connector (`/api/v1/connector/`), which no BamDude release has yet. It has been
+tried in OrcaSlicer on Windows 11; on Linux and macOS only its tests have run.
 
 - The plugin's host-independent core: connection settings that accept one server URL and refuse anything that could
   send the key elsewhere, an HTTP client that always verifies TLS (against a private CA pasted as PEM text, never a
